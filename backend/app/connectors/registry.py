@@ -34,9 +34,10 @@ def sync_sources(session: Session) -> None:
 
 def _register() -> None:
     # imported here: connector modules import app.connectors.base, not this module
+    from app.connectors.imf_weo import ImfWeo
     from app.connectors.worldbank_wdi import WorldBankWDI
 
-    for c in (WorldBankWDI(),):
+    for c in (WorldBankWDI(), ImfWeo()):
         CONNECTORS[c.slug] = c
 
 
