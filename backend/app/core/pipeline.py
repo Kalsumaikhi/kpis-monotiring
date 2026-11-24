@@ -337,3 +337,80 @@ def reject_run(session_factory: SessionFactory, run_id: int) -> Run:
         return _detach(session, run)
     finally:
         session.close()
+
+
+def preview_changes(
+    session: Session,
+    run_id: int,
+    change_type: str | None = None,
+    indicator: str | None = None,
+    country: str | None = None,
+    page: int = 1,
+    page_size: int = 50,
+) -> tuple[list[dict], int]:
+    """Would-be changes of a suspect_pending run, computed from its raw file. Never writes.
+
+    Stages the re-parsed rows in the session's transaction, SELECTs the added/altered/removed
+    rows against the current data_points, then rolls back (which also drops the staging table).
+    """
+    run = session.get(Run, run_id)
+    if run is None or run.status != "suspect_pending":
+        raise ValueError(f"run {run_id} is not suspect_pending")
+    if not run.raw_path:
+        raise ValueError(f"run {run_id} has no raw file")
+    source = session.get(Source, run.source_id)
+    source_id, raw_path = source.id, Path(run.raw_path)
+    connector = get_connector(source.slug)
+    try:
+        parsed = connector.parse(raw_path)
+        stage_rows(session, _canonical_rows(parsed.rows))
+        removed_clause = "OR s.key_hash IS NULL" if parsed.complete else ""
+        where = ["(d.key_hash IS NULL OR s.value_hash <> d.value_hash " + removed_clause + ")"]
+        params: dict = {"sid": source_id, "limit": page_size, "offset": (page - 1) * page_size}
+        if indicator is not None:
+            where.append("COALESCE(s.indicator, d.indicator) = :indicator")
+            params["indicator"] = indicator
+        if country is not None:
+            where.append("COALESCE(s.country, d.country) = :country")
+            params["country"] = country
+        base = f"""
+            SELECT CASE WHEN d.key_hash IS NULL THEN 'added'
+                        WHEN s.key_hash IS NULL THEN 'removed' ELSE 'altered' END AS change_type,
+                COALESCE(s.dataset, d.dataset) AS dataset,
+                COALESCE(s.indicator, d.indicator) AS indicator,
+                COALESCE(s.country, d.country) AS country,
+                COALESCE(s.period, d.period) AS period,
+                COALESCE(s.dims, d.dims) AS dims,
+                d.value_num AS old_num, d.value_text AS old_text,
+                s.value_num AS new_num, s.value_text AS new_text
+            FROM staging s
+            FULL OUTER JOIN (SELECT * FROM data_points WHERE source_id = :sid) d
+                ON d.key_hash = s.key_hash
+            WHERE {" AND ".join(where)}
+        """
+        outer = "WHERE change_type = :change_type" if change_type else ""
+        if change_type:
+            params["change_type"] = change_type
+        total = session.execute(
+            text(f"SELECT count(*) FROM ({base}) c {outer}"), params
+        ).scalar_one()
+        rows = session.execute(
+            text(
+                f"SELECT * FROM ({base}) c {outer} "
+                "ORDER BY indicator, country, period, dataset LIMIT :limit OFFSET :offset"
+            ),
+            params,
+        ).mappings().all()
+        items = [
+            {
+                "change_type": r["change_type"], "dataset": r["dataset"],
+                "indicator": r["indicator"], "country": r["country"],
+                "period": r["period"], "dims": r["dims"],
+                "old": r["old_num"] if r["old_num"] is not None else r["old_text"],
+                "new": r["new_num"] if r["new_num"] is not None else r["new_text"],
+            }
+            for r in rows
+        ]
+        return items, total
+    finally:
+        session.rollback()
