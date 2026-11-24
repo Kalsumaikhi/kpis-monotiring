@@ -291,3 +291,15 @@ def test_second_queued_insert_is_409(client, db_session, source, monkeypatch):
     db_session.commit()
     monkeypatch.setattr("app.api.routes_sources._has_open_run", lambda *a: False)
     assert client.post(f"/api/sources/{source.slug}/run").status_code == 409
+
+
+def test_preview_db_error_is_not_a_409(db_session, pending, monkeypatch):
+    from sqlalchemy.exc import OperationalError
+    _, run = pending
+
+    def down(*a, **k):
+        raise OperationalError("stmt", {}, Exception("db down"))
+
+    monkeypatch.setattr(pipeline, "stage_rows", down)
+    with pytest.raises(OperationalError):
+        pipeline.preview_changes(db_session, run.id)

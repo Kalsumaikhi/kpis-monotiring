@@ -14,6 +14,7 @@ from typing import Callable, Iterable, Protocol
 
 import httpx
 from sqlalchemy import Engine, func, select, text, update
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
@@ -371,7 +372,10 @@ def preview_changes(
         try:
             parsed = connector.parse(raw_path)
             stage_rows(session, _canonical_rows(parsed.rows))
-        except Exception as e:  # noqa: BLE001 - any parse/stage failure
+        except DBAPIError:
+            raise  # database problems are not a bad raw file
+        except Exception as e:  # noqa: BLE001 - connector parse errors, incl. lazy row generators
+            log.exception("preview of run %s: raw file could not be parsed", run_id)
             raise PreviewUnavailableError("raw file could not be parsed") from e
         removed_clause = "OR s.key_hash IS NULL" if parsed.complete else ""
         where = ["(d.key_hash IS NULL OR s.value_hash <> d.value_hash " + removed_clause + ")"]

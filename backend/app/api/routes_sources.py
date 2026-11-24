@@ -135,7 +135,10 @@ def run_now(slug: str, session: Session = Depends(get_session)):
     session.add(run)
     try:
         session.commit()
-    except IntegrityError:  # lost the race against a concurrent run-now
+    except IntegrityError as e:
         session.rollback()
+        if "uq_runs_one_queued_per_source" not in str(e.orig):
+            raise
+        # lost the race against a concurrent run-now
         raise HTTPException(409, "source already has a queued or running run") from None
     return {"run_id": run.id}
