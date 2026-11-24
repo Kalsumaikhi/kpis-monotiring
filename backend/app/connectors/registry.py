@@ -30,3 +30,14 @@ def sync_sources(session: Session) -> None:
             {"slug": c.slug, "name": c.name, "area": c.area, "access": c.access},
         )
     session.commit()
+
+
+def _register() -> None:
+    # imported here: connector modules import app.connectors.base, not this module
+    from app.connectors.worldbank_wdi import WorldBankWDI
+
+    for c in (WorldBankWDI(),):
+        CONNECTORS[c.slug] = c
+
+
+_register()
