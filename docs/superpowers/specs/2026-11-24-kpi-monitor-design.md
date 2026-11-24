@@ -170,24 +170,7 @@ Pages:
 
 Tables must be server-side paginated and filtered (millions of rows).
 
-**Colours:** the user's palette. All colours live in one design-token file (CSS custom properties, light + dark) so components never hard-code a colour; chart series colours come from the same tokens.
-
-| Name | HEX (used on screen) | RGB as supplied | CMYK | PMS |
-|---|---|---|---|---|
-| Dark Green | `#063B2B` | 0/89/76 | 84/20/58/54 | 561 C |
-| Spring Green | `#05EA7D` | 38/208/124 | 56/0/58/0 | 7479 C |
-| Mid Green | `#00874F` | 36/158/107 | 79/7/71/2 | 2417 C |
-| Light Green | `#E8F2DD` | 209/224/215 | 12/1/12/2 | 621 C |
-
-The supplied RGB values don't match the HEX values (e.g. RGB 0/89/76 = `#00594C`); HEX is used for screen unless the user says otherwise.
-
-Usage rules (from contrast checks, WCAG AA 4.5:1 for text):
-- Dark Green: header/sidebar background, primary text on light surfaces (12.6:1 on white).
-- Mid Green: buttons and links on white (4.6:1); white text on Mid Green buttons.
-- Spring Green: accent only on Dark Green (7.8:1) — active nav item, highlights. Never as text or thin lines on white/Light Green (1.6:1).
-- Light Green: page/card tint background on light theme.
-- Status colours outside the palette (needed for failed / held runs): an amber for "suspect — pending review" and a red for "failed", chosen to sit with the greens; "ok/added" uses Mid Green. Status is never shown by colour alone (icon + label too).
-- Chart categories beyond the four greens: use tints/shades of the palette for related series; for change types use added = Mid Green, altered = amber, removed = red.
+**Colours:** use the user's own palette (to be supplied by the user). All colours live in one design-token file (CSS custom properties, light + dark) so the palette is dropped in without touching components; chart series colours come from the same tokens.
 
 ## 6. Constraints
 
