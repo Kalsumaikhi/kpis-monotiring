@@ -3,7 +3,7 @@ from decimal import Decimal
 import numpy as np
 import pytest
 
-from app.core.canonical import RawRow, to_canonical
+from app.core.canonical import MISSING_MARKERS, RawRow, to_canonical
 
 
 def test_formatting_noise_is_equal():
@@ -11,9 +11,19 @@ def test_formatting_noise_is_equal():
     assert a.value_hash == b.value_hash == c.value_hash
 
 
-def test_missing_markers_are_absent():
-    for v in ("..", "", "  n/a ", float("nan"), None, "NaN"):
-        assert to_canonical(RawRow("d", "i", "FRA", "2024", v)) is None
+@pytest.mark.parametrize(
+    "marker",
+    sorted(MISSING_MARKERS)
+    + [m.upper() for m in sorted(MISSING_MARKERS)]
+    + [f"  {m}  " for m in sorted(MISSING_MARKERS)],
+)
+def test_missing_markers_are_absent(marker):
+    assert to_canonical(RawRow("d", "i", "FRA", "2024", marker)) is None
+
+
+@pytest.mark.parametrize("v", [float("nan"), None, "NaN"])
+def test_nan_and_none_are_absent(v):
+    assert to_canonical(RawRow("d", "i", "FRA", "2024", v)) is None
 
 
 def test_text_values_kept():
@@ -81,3 +91,27 @@ def test_non_numeric_spacing_or_underscores_stay_text(v):
 def test_unsupported_type_is_rejected():
     with pytest.raises(TypeError):
         to_canonical(RawRow("d", "i", "FRA", "2024", ["1"]))
+
+
+@pytest.mark.parametrize("v", ["1,5", "1,23", "12,34,567", "1,2345"])
+def test_comma_not_in_thousands_grouping_stays_text(v):
+    r = to_canonical(RawRow("d", "i", "FRA", "2024", v))
+    assert r.value_num is None and r.value_text == v
+
+
+@pytest.mark.parametrize("v", ["1,234", "-1,234,567.25", "+12,345"])
+def test_well_formed_thousands_grouping_is_a_number(v):
+    r = to_canonical(RawRow("d", "i", "FRA", "2024", v))
+    assert r.value_text is None and r.value_num is not None
+
+
+@pytest.mark.parametrize("v", ["\u0661\u0662\u0663", "\u0661,\u0662\u0663\u0664", "\uff11\uff12"])
+def test_non_ascii_digits_stay_text(v):
+    r = to_canonical(RawRow("d", "i", "FRA", "2024", v))
+    assert r.value_num is None and r.value_text == v
+
+
+@pytest.mark.parametrize("v", ["1E1000000", "-1E1000000"])
+def test_decimal_overflow_is_kept_as_text(v):
+    r = to_canonical(RawRow("d", "i", "FRA", "2024", v))
+    assert r.value_num is None and r.value_text == v

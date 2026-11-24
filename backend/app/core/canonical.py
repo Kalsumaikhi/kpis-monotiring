@@ -11,6 +11,7 @@ import hashlib
 import json
 import math
 import numbers
+import re
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation, localcontext
 from typing import Any, Mapping
@@ -18,6 +19,11 @@ from typing import Any, Mapping
 MISSING_MARKERS = {"", "..", "...", "n/a", "na", "nan", "-", "—", "none", "null"}
 
 _SIGNIFICANT_DIGITS = 10
+
+# ASCII digits only ([0-9], not \d), so non-Latin digit characters stay text.
+_PLAIN_NUMBER = re.compile(r"[+-]?(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:[eE][+-]?[0-9]+)?")
+_GROUPED_NUMBER = re.compile(r"[+-]?[0-9]{1,3}(?:,[0-9]{3})+(?:\.[0-9]+)?")
+_INFINITE_WORDS = {"inf", "+inf", "-inf", "infinity", "+infinity", "-infinity"}
 
 
 @dataclass(frozen=True)
@@ -81,16 +87,22 @@ def _number_to_decimal(v: Any) -> Decimal | None:
 
 def _text_to_value(s: str) -> tuple[Decimal | None, str | None] | None:
     trimmed = s.strip()
-    if trimmed.lower() in MISSING_MARKERS:
+    if trimmed.lower() in MISSING_MARKERS or trimmed.lower() in _INFINITE_WORDS:
         return None
-    # Decimal() also accepts underscores ("1_000"); those are not numbers in source data.
-    if "_" in trimmed:
+    if "," in trimmed:
+        # Commas only count as thousands separators in a well-formed grouping ("1,234.5").
+        if not _GROUPED_NUMBER.fullmatch(trimmed):
+            return (None, trimmed)
+        candidate = trimmed.replace(",", "")
+    elif _PLAIN_NUMBER.fullmatch(trimmed):
+        candidate = trimmed
+    else:
         return (None, trimmed)
     try:
-        parsed = Decimal(trimmed.replace(",", ""))
-    except InvalidOperation:
+        num = _normalise_decimal(Decimal(candidate))
+    except ArithmeticError:
+        # e.g. "1E1000000" overflows the decimal context; keep it as text.
         return (None, trimmed)
-    num = _normalise_decimal(parsed)
     if num is None:
         return None
     return (num, None)
