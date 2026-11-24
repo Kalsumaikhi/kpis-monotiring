@@ -73,3 +73,47 @@ def seed(session, source, rows):
     """Baseline-load data_points through apply_diff without recording changes."""
     stage_rows(session, rows)
     apply_diff(session, source.id, 0, complete=True, record_changes=False)
+
+
+class FakeConnector:
+    slug = "fake"
+    name = "Fake"
+    area = "test"
+    access = "manual"
+    raw_suffix = ".json"
+
+    def __init__(self, rows=None, complete=True, fail_download=False, fail_parse_after=None):
+        self.rows = rows or []
+        self.complete = complete
+        self.fail_download = fail_download
+        self.fail_parse_after = fail_parse_after
+
+    def download(self, client, dest):
+        if self.fail_download:
+            raise RuntimeError("boom download")
+        dest.write_text("raw")
+
+    def parse(self, raw):
+        from app.connectors.base import IndicatorMeta, ParseResult
+
+        def gen():
+            for n, r in enumerate(self.rows):
+                if self.fail_parse_after is not None and n >= self.fail_parse_after:
+                    raise RuntimeError("boom parse")
+                yield r
+
+        return ParseResult(
+            rows=gen(), complete=self.complete,
+            indicators=[IndicatorMeta(code="i", name="Indicator I", unit="u")],
+            vintage="v1",
+        )
+
+
+@pytest.fixture
+def session_factory(db_session, monkeypatch, tmp_path):
+    """Sessions on the test connection; their commits stay inside the outer transaction."""
+    from app.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "raw_dir", str(tmp_path))
+    connection = db_session.get_bind()
+    return lambda: Session(bind=connection, join_transaction_mode="create_savepoint")
