@@ -7,6 +7,7 @@ TEMP table ON COMMIT DROP), so nothing commits between them.
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterable, Protocol
@@ -32,6 +33,23 @@ class Notifier(Protocol):
     def notify_run(
         self, run: Run, source: Source, top_indicators: list[tuple[str, int]], streak: int
     ) -> None: ...
+
+
+_URL = re.compile(r"https?://\S+")
+
+
+def _safe_error(e: Exception) -> str:
+    """Error text for storage: URLs (which may embed secrets) redacted, truncated."""
+    msg = _URL.sub("<url>", f"{type(e).__name__}: {e}")
+    return msg[:2000]
+
+
+def _safe_prune(session: Session, source_id: int) -> None:
+    try:
+        raw_store.prune(session, source_id, get_settings().raw_retention_runs)
+    except Exception:  # noqa: BLE001 - housekeeping must not change the run outcome
+        log.exception("raw prune failed for source %s", source_id)
+        session.rollback()
 
 
 def _now() -> datetime:
@@ -99,7 +117,7 @@ def _notify(session: Session, run: Run, notifier) -> None:
         log.exception("notifier failed for run %s", run.id)
         session.rollback()
         session.execute(
-            update(Run).where(Run.id == run.id).values(notify_error=repr(e))
+            update(Run).where(Run.id == run.id).values(notify_error=_safe_error(e))
         )
         session.commit()
         session.refresh(run)
@@ -116,7 +134,7 @@ def _fail(session: Session, run_id: int, e: Exception) -> Run:
     session.rollback()
     run = session.get(Run, run_id)
     run.status = "failed"
-    run.error = repr(e)
+    run.error = _safe_error(e)
     run.finished_at = _now()
     session.commit()
     return run
@@ -129,8 +147,16 @@ def _finish(session: Session, run: Run, status: str, diff: DiffResult, metas, vi
     run.vintage = vintage
     run.finished_at = _now()
     _upsert_indicators(session, run.source_id, metas)
+    if status != "suspect_pending":
+        # Newer good data makes any earlier held run stale: approving it would re-apply old removals.
+        session.execute(
+            update(Run)
+            .where(Run.source_id == run.source_id, Run.status == "suspect_pending",
+                   Run.id < run.id)
+            .values(status="superseded")
+        )
     session.commit()
-    raw_store.prune(session, run.source_id, get_settings().raw_retention_runs)
+    _safe_prune(session, run.source_id)
 
 
 def run_source(
@@ -150,7 +176,7 @@ def run_source(
         run_id = run.id
 
         try:
-            suffix = getattr(connector, "raw_suffix", ".bin")
+            suffix = connector.raw_suffix
             dest = raw_store.path_for(slug, run_id, suffix)
             run.raw_path = str(dest)
             session.commit()

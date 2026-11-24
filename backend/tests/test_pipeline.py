@@ -145,3 +145,71 @@ def test_sync_sources_keeps_cron_and_enabled(env, db_session):
     registry.sync_sources(db_session)
     db_session.refresh(src)
     assert (src.cron, src.enabled, src.name) == ("5 5 * * *", False, "Fake")
+
+
+def test_prune_failure_leaves_run_ok(env, db_session, monkeypatch):
+    src, conn, sf = env
+    conn.rows = [raw("AT", "2020", 1)]
+    pipeline.run_source(sf, "fake")
+    conn.rows = [raw("AT", "2020", 2)]
+
+    def boom(*a, **k):
+        raise OSError("disk")
+
+    monkeypatch.setattr(pipeline.raw_store, "prune", boom)
+    run = pipeline.run_source(sf, "fake")
+    assert run.status == "ok"
+    assert run.error is None
+
+
+def test_older_suspect_is_superseded_by_later_good_run(env, db_session):
+    src, conn, sf = env
+    _baseline_ten(conn, sf)
+    a = pipeline.run_source(sf, "fake")
+    assert a.status == "suspect_pending"
+    conn.rows = [raw(f"C{i}", "2020", i) for i in range(10)]
+    b = pipeline.run_source(sf, "fake")
+    assert b.status == "no_change"
+    db_session.expire_all()
+    assert db_session.get(Run, a.id).status == "superseded"
+    with pytest.raises(ValueError):
+        pipeline.approve_run(sf, a.id)
+
+
+def test_errors_are_redacted_and_truncated(env, db_session):
+    src, conn, sf = env
+
+    def leaky(client, dest):
+        raise RuntimeError("POST https://mm.example.com/hooks/SECRET failed " + "x" * 5000)
+
+    conn.download = leaky
+    run = pipeline.run_source(sf, "fake")
+    assert run.error.startswith("RuntimeError: POST <url> failed")
+    assert "SECRET" not in run.error
+    assert len(run.error) <= 2000
+
+    n = RecordingNotifier()
+    n.notify_run = lambda *a: (_ for _ in ()).throw(ValueError("see https://h/SECRET"))
+    conn.download = FakeConnector().download
+    conn.rows = [raw("AT", "2020", 1)]
+    run = pipeline.run_source(sf, "fake", notifier=n)
+    assert run.notify_error == "ValueError: see <url>"
+
+
+def test_prune_keeps_newest_and_spares_suspect(env, db_session, tmp_path):
+    from pathlib import Path
+    from app.core import raw_store
+
+    src, conn, sf = env
+    runs = []
+    for i, status in enumerate(["ok", "suspect_pending", "ok", "ok", "ok"]):
+        f = tmp_path / f"f{i}.json"
+        f.write_text("x")
+        r = Run(source_id=src.id, status=status, raw_path=str(f))
+        db_session.add(r)
+        runs.append(r)
+    db_session.flush()
+    raw_store.prune(db_session, src.id, 2)
+    assert [Path(r.raw_path).exists() if r.raw_path else None for r in runs] == [
+        None, True, None, True, True,
+    ]

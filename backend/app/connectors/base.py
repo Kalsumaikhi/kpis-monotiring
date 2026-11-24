@@ -32,7 +32,7 @@ class Connector(Protocol):
     name: str
     area: str
     access: str
-    raw_suffix: str  # optional on implementations; the pipeline defaults to ".bin"
+    raw_suffix: str  # required: extension of the single raw file, e.g. ".zip"
 
     def download(self, client: httpx.Client, dest: Path) -> None:
         """Write exactly one raw file at `dest`."""
