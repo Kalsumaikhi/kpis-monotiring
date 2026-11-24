@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.api.util import iso
 from app.api.deps import get_session, get_session_factory
 from app.core import pipeline
 from app.core.pipeline import SourceBusyError, approve_run, reject_run
@@ -16,10 +17,6 @@ from app.models import Change, Run, Source
 from app.notify.mattermost import notifier_from_settings
 
 router = APIRouter()
-
-
-def _iso(dt: datetime | None) -> str | None:
-    return dt.isoformat() if dt else None
 
 
 def _json_value(value):
@@ -33,8 +30,8 @@ def _run_dict(run: Run, slug: str) -> dict:
         "source": slug,
         "status": run.status,
         "trigger": run.trigger,
-        "started_at": _iso(run.started_at),
-        "finished_at": _iso(run.finished_at),
+        "started_at": iso(run.started_at),
+        "finished_at": iso(run.finished_at),
         "vintage": run.vintage,
         "rows_total": run.rows_total,
         "added": run.added,

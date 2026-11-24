@@ -3,7 +3,7 @@ from decimal import Decimal
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.api import deps
 from app.api.main import create_app
@@ -11,7 +11,7 @@ from app.config import get_settings
 from app.connectors import registry
 from app.core import pipeline
 from app.core.canonical import RawRow
-from app.models import Change, Run, Source
+from app.models import Change, DataPoint, Run, Source
 from tests.conftest import FakeConnector, row, seed
 
 AUTH = ("anyone", "secret")
@@ -200,6 +200,7 @@ def pending(db_session, session_factory, monkeypatch):
 def test_preview_changes_does_not_write(db_session, pending):
     src, run = pending
     before = db_session.scalar(select(Change.id).limit(1))
+    dp_before = db_session.scalar(select(func.count()).select_from(DataPoint))
     items, total = pipeline.preview_changes(db_session, run.id)
     assert total == 4
     by = {(i["change_type"], i["country"]): i for i in items}
@@ -207,6 +208,7 @@ def test_preview_changes_does_not_write(db_session, pending):
     assert by[("altered", "BE")]["old"] == Decimal("1") and by[("altered", "BE")]["new"] == Decimal("9")
     assert by[("removed", "DE")]["new"] is None and by[("added", "FR")]["old"] is None
     assert db_session.scalar(select(Change.id).limit(1)) == before  # nothing recorded
+    assert db_session.scalar(select(func.count()).select_from(DataPoint)) == dp_before
     assert db_session.get(Run, run.id).status == "suspect_pending"
     items, total = pipeline.preview_changes(db_session, run.id, change_type="removed", page_size=1)
     assert total == 2 and len(items) == 1
@@ -246,3 +248,46 @@ def test_approve_source_busy_409(client, pending, monkeypatch):
     monkeypatch.setattr("app.api.routes_runs.approve_run", busy)
     r = client.post(f"/api/runs/{run.id}/approve")
     assert r.status_code == 409 and r.json()["detail"] == "source busy"
+
+
+def test_preview_missing_raw_file_409(client, db_session, pending):
+    import os
+    _, run = pending
+    os.remove(db_session.get(Run, run.id).raw_path)
+    r = client.get(f"/api/runs/{run.id}/changes")
+    assert r.status_code == 409 and r.json()["detail"] == "raw file unavailable for preview"
+
+
+def test_preview_unparseable_raw_file_409(client, db_session, pending, monkeypatch):
+    _, run = pending
+
+    def boom(raw):
+        raise RuntimeError("bad file")
+
+    monkeypatch.setattr(registry.CONNECTORS["fake"], "parse", boom)
+    r = client.get(f"/api/runs/{run.id}/changes")
+    assert r.status_code == 409 and r.json()["detail"] == "raw file could not be parsed"
+
+
+def _api_routes():
+    spec = create_app().openapi()["paths"]
+    return [(m.upper(), p.replace("{run_id}", "1").replace("{slug}", "x"))
+            for p, ops in spec.items() if p != "/api/health" for m in ops]
+
+
+@pytest.mark.parametrize("method,path", _api_routes())
+def test_every_api_route_requires_auth(client, method, path):
+    assert client.request(method, path, auth=None).status_code == 401
+
+
+def test_docs_not_exposed(client):
+    for p in ("/docs", "/redoc", "/openapi.json"):
+        assert client.get(p, auth=None).status_code == 404
+
+
+def test_second_queued_insert_is_409(client, db_session, source, monkeypatch):
+    # lose the race: the pre-check sees nothing but the unique index rejects the insert
+    db_session.add(Run(source_id=source.id, status="queued"))
+    db_session.commit()
+    monkeypatch.setattr("app.api.routes_sources._has_open_run", lambda *a: False)
+    assert client.post(f"/api/sources/{source.slug}/run").status_code == 409

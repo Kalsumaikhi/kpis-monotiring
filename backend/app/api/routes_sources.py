@@ -7,16 +7,14 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import func, select, text
 from sqlalchemy.dialects.postgresql import distinct_on
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.api.util import iso
 from app.api.deps import get_session
 from app.models import Change, DataPoint, Run, Source
 
 router = APIRouter()
-
-
-def _iso(dt: datetime | None) -> str | None:
-    return dt.isoformat() if dt else None
 
 
 class SourcePatch(BaseModel):
@@ -42,12 +40,12 @@ def _serialise(source: Source, last_run: Run | None, last_change_at, rows_tracke
         "last_run": None if last_run is None else {
             "id": last_run.id,
             "status": last_run.status,
-            "finished_at": _iso(last_run.finished_at),
+            "finished_at": iso(last_run.finished_at),
             "added": last_run.added,
             "altered": last_run.altered,
             "removed": last_run.removed,
         },
-        "last_change_at": _iso(last_change_at),
+        "last_change_at": iso(last_change_at),
         "rows_tracked": rows_tracked,
         "changes_30d": changes_30d,
         "failing_streak": streak,
@@ -117,19 +115,27 @@ def patch_source(slug: str, body: SourcePatch, session: Session = Depends(get_se
     return {"slug": source.slug, "enabled": source.enabled, "cron": source.cron}
 
 
+def _has_open_run(session: Session, source_id: int) -> bool:
+    return bool(session.scalar(
+        select(
+            select(Run.id)
+            .where(Run.source_id == source_id, Run.status.in_(("queued", "running")))
+            .exists()
+        )
+    ))
+
+
 @router.post("/sources/{slug}/run", status_code=202)
 def run_now(slug: str, session: Session = Depends(get_session)):
     source = _source_or_404(session, slug)
-    busy = session.scalar(
-        select(
-            select(Run.id)
-            .where(Run.source_id == source.id, Run.status.in_(("queued", "running")))
-            .exists()
-        )
-    )
+    busy = _has_open_run(session, source.id)
     if busy:
         raise HTTPException(409, "source already has a queued or running run")
     run = Run(source_id=source.id, status="queued", trigger="manual")
     session.add(run)
-    session.commit()
+    try:
+        session.commit()
+    except IntegrityError:  # lost the race against a concurrent run-now
+        session.rollback()
+        raise HTTPException(409, "source already has a queued or running run") from None
     return {"run_id": run.id}

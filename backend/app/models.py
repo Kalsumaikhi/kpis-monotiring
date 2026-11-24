@@ -87,6 +87,10 @@ class DataPoint(Base):
 
 class Run(Base):
     __tablename__ = "runs"
+    __table_args__ = (
+        Index("uq_runs_one_queued_per_source", "source_id", unique=True,
+              postgresql_where=text("status = 'queued'")),
+    )
     id: Mapped[int] = _id()
     source_id: Mapped[int] = mapped_column(ForeignKey("sources.id"))
     status: Mapped[str] = mapped_column(Text)

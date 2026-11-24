@@ -39,6 +39,10 @@ class SourceBusyError(Exception):
     """Another run of this source holds the per-source advisory lock."""
 
 
+class PreviewUnavailableError(ValueError):
+    """The raw file of a held run cannot be previewed (missing or unparseable)."""
+
+
 class RunNotQueuedError(Exception):
     """The queued run was claimed elsewhere (or is not queued) before we could claim it."""
 
@@ -362,8 +366,13 @@ def preview_changes(
     source_id, raw_path = source.id, Path(run.raw_path)
     connector = get_connector(source.slug)
     try:
-        parsed = connector.parse(raw_path)
-        stage_rows(session, _canonical_rows(parsed.rows))
+        if not raw_path.exists():
+            raise PreviewUnavailableError("raw file unavailable for preview")
+        try:
+            parsed = connector.parse(raw_path)
+            stage_rows(session, _canonical_rows(parsed.rows))
+        except Exception as e:  # noqa: BLE001 - any parse/stage failure
+            raise PreviewUnavailableError("raw file could not be parsed") from e
         removed_clause = "OR s.key_hash IS NULL" if parsed.complete else ""
         where = ["(d.key_hash IS NULL OR s.value_hash <> d.value_hash " + removed_clause + ")"]
         params: dict = {"sid": source_id, "limit": page_size, "offset": (page - 1) * page_size}
@@ -381,6 +390,7 @@ def preview_changes(
                 COALESCE(s.country, d.country) AS country,
                 COALESCE(s.period, d.period) AS period,
                 COALESCE(s.dims, d.dims) AS dims,
+                COALESCE(s.key_hash, d.key_hash) AS key_hash,
                 d.value_num AS old_num, d.value_text AS old_text,
                 s.value_num AS new_num, s.value_text AS new_text
             FROM staging s
@@ -397,7 +407,7 @@ def preview_changes(
         rows = session.execute(
             text(
                 f"SELECT * FROM ({base}) c {outer} "
-                "ORDER BY indicator, country, period, dataset LIMIT :limit OFFSET :offset"
+                "ORDER BY indicator, country, period, dataset, key_hash LIMIT :limit OFFSET :offset"
             ),
             params,
         ).mappings().all()

@@ -5,7 +5,7 @@ from app.api.deps import require_auth
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="KPI Monitor")
+    app = FastAPI(title="KPI Monitor", docs_url=None, redoc_url=None, openapi_url=None)
 
     @app.get("/api/health")
     def health():
