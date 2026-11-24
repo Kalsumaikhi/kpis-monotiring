@@ -22,6 +22,7 @@ dev = ["pytest>=8", "respx>=0.21"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+markers = ["slow: slow tests (deselect with -m \"not slow\")"]
 
 [tool.setuptools.packages.find]
 include = ["app*"]
