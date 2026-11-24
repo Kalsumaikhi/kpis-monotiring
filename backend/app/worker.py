@@ -12,7 +12,9 @@ from apscheduler.triggers.cron import CronTrigger
 from sqlalchemy import select, update
 
 from app.connectors.registry import CONNECTORS, sync_sources
-from app.core.pipeline import Notifier, SessionFactory, run_source
+from app.core.pipeline import (
+    Notifier, RunNotQueuedError, SessionFactory, SourceBusyError, run_source,
+)
 from app.models import Run, Source
 
 log = logging.getLogger(__name__)
@@ -29,6 +31,8 @@ def _job_id(slug: str) -> str:
 def _scheduled_run(session_factory: SessionFactory, slug: str, notifier: Notifier | None) -> None:
     try:
         run_source(session_factory, slug, trigger="schedule", notifier=notifier)
+    except SourceBusyError:
+        log.warning("skipped: source busy (%s)", slug)
     except Exception:  # noqa: BLE001 - keep the scheduler thread alive
         log.exception("scheduled run of %s crashed", slug)
 
@@ -61,7 +65,8 @@ def reload_jobs(scheduler: BackgroundScheduler, session_factory: SessionFactory,
         if job is None:
             scheduler.add_job(
                 _scheduled_run, trigger, args=[session_factory, slug, notifier],
-                id=_job_id(slug), max_instances=1, coalesce=True, replace_existing=True,
+                id=_job_id(slug), max_instances=1, coalesce=True, misfire_grace_time=3600,
+                replace_existing=True,
             )
         elif str(job.trigger) != str(trigger):
             scheduler.reschedule_job(job.id, trigger=trigger)
@@ -79,13 +84,22 @@ def poll_queued_once(session_factory: SessionFactory, notifier: Notifier | None)
         ).all()
     finally:
         session.close()
+    started = 0
     for run_id, trigger, slug in queued:
         try:
             run_source(session_factory, slug, trigger=trigger, notifier=notifier, run_id=run_id)
+            started += 1
+        except SourceBusyError:
+            log.info("source %s busy; run %s stays queued", slug, run_id)
+        except RunNotQueuedError:
+            log.info("run %s already claimed; skipping", run_id)
         except Exception as e:  # noqa: BLE001
             log.exception("queued run %s (%s) crashed", run_id, slug)
-            _mark_failed(session_factory, run_id, f"{type(e).__name__}: {e}"[:2000])
-    return len(queued)
+            try:
+                _mark_failed(session_factory, run_id, f"{type(e).__name__}: {e}"[:2000])
+            except Exception:  # noqa: BLE001
+                log.exception("could not mark run %s failed", run_id)
+    return started
 
 
 def _mark_failed(session_factory: SessionFactory, run_id: int, error: str) -> None:
@@ -115,7 +129,10 @@ def sweep_stale_runs(session_factory: SessionFactory) -> int:
 
 
 def build_scheduler(session_factory: SessionFactory, notifier: Notifier | None) -> BackgroundScheduler:
-    scheduler = BackgroundScheduler(timezone="UTC")
+    scheduler = BackgroundScheduler(
+        timezone="UTC",
+        job_defaults={"misfire_grace_time": 3600, "coalesce": True, "max_instances": 1},
+    )
     reload_jobs(scheduler, session_factory, notifier)
     scheduler.add_job(
         poll_queued_once, "interval", seconds=POLL_SECONDS, args=[session_factory, notifier],

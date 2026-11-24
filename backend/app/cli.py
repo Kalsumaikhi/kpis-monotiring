@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 from app.connectors.registry import CONNECTORS, sync_sources
-from app.core.pipeline import run_source
+from app.core.pipeline import SourceBusyError, run_source
 from app.db import SessionLocal
 from app.notify.mattermost import notifier_from_settings
 
@@ -54,6 +54,9 @@ def main(argv: list[str] | None = None) -> int:
         CONNECTORS[args.slug] = _FromRaw(original, args.from_raw)
     try:
         run = run_source(SessionLocal, args.slug, trigger="manual", notifier=notifier_from_settings())
+    except SourceBusyError:
+        print(f"{args.slug}: busy")
+        return 3
     finally:
         CONNECTORS[args.slug] = original
     print(f"{args.slug}: {run.status} rows={run.rows_total} added={run.added} "

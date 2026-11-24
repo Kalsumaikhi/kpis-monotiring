@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Callable, Iterable, Protocol
 
 import httpx
-from sqlalchemy import func, select, text, update
+from sqlalchemy import Engine, func, select, text, update
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
@@ -33,6 +33,51 @@ class Notifier(Protocol):
     def notify_run(
         self, run: Run, source: Source, top_indicators: list[tuple[str, int]], streak: int
     ) -> None: ...
+
+
+class SourceBusyError(Exception):
+    """Another run of this source holds the per-source advisory lock."""
+
+
+class RunNotQueuedError(Exception):
+    """The queued run was claimed elsewhere (or is not queued) before we could claim it."""
+
+
+LOCK_NAMESPACE = 7421  # first key of pg_try_advisory_lock(int, int); second key is source_id
+
+
+def _acquire_source_lock(session: Session, source_id: int) -> Callable[[], None]:
+    """Session-level advisory lock on a dedicated connection; returns the release function.
+
+    If the session is bound to an Engine, a fresh autocommit connection is used so the
+    lock outlives the session's own transactions. If it is bound to a Connection (tests),
+    that connection is reused.
+    """
+    bind = session.get_bind()
+    own = isinstance(bind, Engine)
+    conn = bind.connect().execution_options(isolation_level="AUTOCOMMIT") if own else bind
+    params = {"ns": LOCK_NAMESPACE, "sid": source_id}
+    try:
+        got = conn.execute(text("SELECT pg_try_advisory_lock(:ns, :sid)"), params).scalar()
+    except Exception:
+        if own:
+            conn.close()
+        raise
+    if not got:
+        if own:
+            conn.close()
+        raise SourceBusyError(f"source {source_id} is busy")
+
+    def release() -> None:
+        try:
+            conn.execute(text("SELECT pg_advisory_unlock(:ns, :sid)"), params)
+        except Exception:  # noqa: BLE001 - a dead connection has dropped the lock anyway
+            log.exception("advisory unlock failed for source %s", source_id)
+        finally:
+            if own:
+                conn.close()
+
+    return release
 
 
 _URL = re.compile(r"https?://\S+")
@@ -172,18 +217,24 @@ def run_source(
     connector = get_connector(slug)
     settings = get_settings()
     session = session_factory()
+    release = None
     try:
         source = session.scalars(select(Source).where(Source.slug == slug)).one()
+        release = _acquire_source_lock(session, source.id)  # SourceBusyError before any row
         if run_id is not None:
+            claimed = session.execute(
+                update(Run)
+                .where(Run.id == run_id, Run.source_id == source.id, Run.status == "queued")
+                .values(status="running", started_at=func.now())
+            ).rowcount
+            session.commit()
+            if claimed == 0:
+                raise RunNotQueuedError(f"run {run_id} is not a queued run of {slug}")
             run = session.get(Run, run_id)
-            if run is None or run.source_id != source.id or run.status != "queued":
-                raise ValueError(f"run {run_id} is not a queued run of {slug}")
-            run.status = "running"
-            run.started_at = _now()
         else:
             run = Run(source_id=source.id, status="running", trigger=trigger)
             session.add(run)
-        session.commit()
+            session.commit()
         run_id = run.id
 
         try:
@@ -238,6 +289,8 @@ def run_source(
         return _detach(session, run)
     finally:
         session.close()
+        if release is not None:
+            release()
 
 
 def approve_run(session_factory: SessionFactory, run_id: int, notifier: Notifier | None = None) -> Run:

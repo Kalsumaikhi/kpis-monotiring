@@ -34,7 +34,8 @@ def test_cli_run_failed_exits_nonzero(cli_env, capsys):
     assert capsys.readouterr().out.startswith("fa: failed")
 
 
-def test_cli_from_raw_copies_file(cli_env, tmp_path, capsys):
+def test_cli_from_raw_copies_file(cli_env, tmp_path, capsys, db_session):
+    db = db_session
     raw = tmp_path / "in.json"
     raw.write_text("from-file")
     seen = {}
@@ -42,6 +43,9 @@ def test_cli_from_raw_copies_file(cli_env, tmp_path, capsys):
     cli_env.parse = lambda p: (seen.setdefault("text", p.read_text()), orig(p))[1]
     assert cli.main(["run", "fa", "--from-raw", str(raw)]) == 0
     assert seen["text"] == "from-file"
+    assert cli_env.raw_suffix == ".json"
+    from app.models import Run
+    assert db.query(Run).one().raw_path.endswith(".json")
     assert CONNECTORS["fa"] is cli_env  # registry restored after the run
 
 
@@ -49,3 +53,14 @@ def test_cli_sync_sources(session_factory, monkeypatch, db_session):
     monkeypatch.setattr(cli, "SessionLocal", session_factory)
     assert cli.main(["sync-sources"]) == 0
     assert db_session.query(Source).filter_by(slug="sipri-milex").count() == 1
+
+
+def test_cli_busy_exits_3(cli_env, capsys, monkeypatch):
+    from app.core.pipeline import SourceBusyError
+
+    def busy(*a, **k):
+        raise SourceBusyError("x")
+
+    monkeypatch.setattr(cli, "run_source", busy)
+    assert cli.main(["run", "fa"]) == 3
+    assert capsys.readouterr().out.strip() == "fa: busy"
