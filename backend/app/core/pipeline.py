@@ -166,14 +166,23 @@ def run_source(
     slug: str,
     trigger: str = "schedule",
     notifier: Notifier | None = None,
+    run_id: int | None = None,
 ) -> Run:
+    """Run one source. With run_id, reuse that queued Run row (keeping its trigger)."""
     connector = get_connector(slug)
     settings = get_settings()
     session = session_factory()
     try:
         source = session.scalars(select(Source).where(Source.slug == slug)).one()
-        run = Run(source_id=source.id, status="running", trigger=trigger)
-        session.add(run)
+        if run_id is not None:
+            run = session.get(Run, run_id)
+            if run is None or run.source_id != source.id or run.status != "queued":
+                raise ValueError(f"run {run_id} is not a queued run of {slug}")
+            run.status = "running"
+            run.started_at = _now()
+        else:
+            run = Run(source_id=source.id, status="running", trigger=trigger)
+            session.add(run)
         session.commit()
         run_id = run.id
 
