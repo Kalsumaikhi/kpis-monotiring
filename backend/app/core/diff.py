@@ -2,6 +2,9 @@
 
 Rows of one source are bulk-loaded into a temp table, then compared and applied
 with single SQL statements, never per-row Python loops.
+
+stage_rows, compute_diff and apply_diff must share one transaction: staging is
+ON COMMIT DROP, so a commit between them loses the staged rows.
 """
 
 from __future__ import annotations

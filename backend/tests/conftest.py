@@ -21,7 +21,8 @@ def db_engine():
     if not TEST_DATABASE_URL:
         pytest.skip("TEST_DATABASE_URL is not set")
     db_name = make_url(TEST_DATABASE_URL).database or ""
-    assert "test" in db_name, f"refusing to DROP SCHEMA on non-test database {db_name!r}"
+    if "test" not in db_name:
+        raise RuntimeError(f"refusing to DROP SCHEMA on non-test database {db_name!r}")
     engine = create_engine(TEST_DATABASE_URL)
     with engine.begin() as conn:
         conn.execute(text("DROP SCHEMA public CASCADE"))
