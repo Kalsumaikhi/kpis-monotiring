@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, Protocol
 
@@ -25,6 +25,7 @@ class ParseResult:
     complete: bool
     indicators: list[IndicatorMeta]
     vintage: str | None = None
+    warnings: list[str] = field(default_factory=list)
 
 
 class Connector(Protocol):

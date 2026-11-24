@@ -68,6 +68,7 @@ def test_failed_indicator_marks_incomplete(tmp_path):
     res = ImfWeo().parse(_raw(tmp_path, failed=["NGDPD"]))
     assert res.complete is False
     assert not any(r.indicator == "NGDPD" for r in res.rows)
+    assert res.warnings == ["incomplete: 1 indicators failed: NGDPD"]
 
 
 @respx.mock
@@ -124,7 +125,7 @@ def test_client_error_not_retried_but_recorded(tmp_path):
 @respx.mock
 def test_indicator_list_failure_raises(tmp_path):
     respx.get(f"{BASE}/indicators").respond(500)
-    with pytest.raises(Exception):
+    with pytest.raises(httpx.HTTPStatusError):
         ImfWeo().download(httpx.Client(), tmp_path / "o.json")
     assert not (tmp_path / "o.json").exists()
 
@@ -138,3 +139,19 @@ def test_rate_limited(tmp_path, monkeypatch):
         respx.get(f"{BASE}/{c}").respond(json=_load(f"{c}.json"))
     ImfWeo().download(httpx.Client(), tmp_path / "o.json")
     assert len(sleeps) >= 3 and all(s <= 0.5 for s in sleeps)
+
+
+@respx.mock
+def test_429_then_200_succeeds_and_honours_retry_after(tmp_path, monkeypatch):
+    sleeps = []
+    monkeypatch.setattr(imf_weo, "_sleep", sleeps.append)
+    respx.get(f"{BASE}/indicators").respond(json=_load("indicators.json"))
+    for c in ("NGDP_RPCH", "PCPIPCH"):
+        respx.get(f"{BASE}/{c}").respond(json=_load(f"{c}.json"))
+    respx.get(f"{BASE}/NGDPD").mock(side_effect=[
+        httpx.Response(429, headers={"Retry-After": "999"}),
+        httpx.Response(200, json=_load("NGDPD.json"))])
+    dest = tmp_path / "o.json"
+    ImfWeo().download(httpx.Client(), dest)
+    assert json.loads(dest.read_text())["failed"] == []
+    assert 30.0 in sleeps and max(sleeps) == 30.0

@@ -17,7 +17,8 @@ Design choices:
 - vintage = the most common non-empty `source` among indicators whose dataset == "WEO"; None if
   there are none.
 - At most 2 requests/second (0.5 s pause between requests). Each indicator request is tried up
-  to 3 times with exponential backoff on network errors and 5xx; 4xx is not retried. A code that
+  to 3 times with exponential backoff on network errors, 5xx, 408 and 429 (a numeric Retry-After
+  is honoured, capped at 30 s); other 4xx are not retried. A code that
   still fails is recorded under "failed" in the raw file and parse returns complete=False.
   A failure to fetch the indicator list raises.
 - Raw file: {"indicators": {...}, "data": {code: payload}, "failed": [code, ...]}.
@@ -41,6 +42,8 @@ MIN_INTERVAL = 0.5  # seconds between requests => max 2 requests/second
 ATTEMPTS = 3
 BACKOFF = 1.0  # seconds; doubled per retry
 TIMEOUT = 60.0
+RETRYABLE = {408, 429}
+MAX_RETRY_AFTER = 30.0
 
 
 def _sleep(seconds: float) -> None:  # module-level so tests can patch it
@@ -59,8 +62,8 @@ class ImfWeo:
     raw_suffix = ".json"
 
     def download(self, client: httpx.Client, dest: Path) -> None:
-        self._first = True
-        resp = self._get(client, f"{BASE}/indicators", attempts=ATTEMPTS)
+        state = {"first": True}
+        resp = self._get(client, f"{BASE}/indicators", state)
         indicators = resp.json().get("indicators") or {}
         data: dict[str, dict] = {}
         failed: list[str] = []
@@ -68,31 +71,35 @@ class ImfWeo:
             if not code or not code.strip():
                 continue
             try:
-                data[code] = self._get(client, f"{BASE}/{code}", attempts=ATTEMPTS).json()
+                data[code] = self._get(client, f"{BASE}/{code}", state).json()
             except (httpx.HTTPError, ValueError):
                 failed.append(code)
         tmp = dest.with_name(dest.name + ".part")
         tmp.write_text(json.dumps({"indicators": indicators, "data": data, "failed": failed}))
         tmp.replace(dest)
 
-    def _get(self, client: httpx.Client, url: str, attempts: int) -> httpx.Response:
+    def _get(self, client: httpx.Client, url: str, state: dict) -> httpx.Response:
         last: Exception | None = None
-        for attempt in range(attempts):
-            if not self._first:
+        for attempt in range(ATTEMPTS):
+            if not state["first"]:
                 _sleep(MIN_INTERVAL)
-            self._first = False
+            state["first"] = False
+            delay = BACKOFF * 2**attempt
             try:
                 r = client.get(url, timeout=TIMEOUT)
-                if r.status_code < 500:
-                    r.raise_for_status()  # 4xx: raise immediately, no retry
+                if r.status_code < 500 and r.status_code not in RETRYABLE:
+                    r.raise_for_status()  # other 4xx: raise immediately, no retry
                     return r
                 last = httpx.HTTPStatusError(f"{r.status_code} for {url}", request=r.request, response=r)
+                ra = r.headers.get("Retry-After", "")
+                if ra.strip().isdigit():
+                    delay = min(float(ra), MAX_RETRY_AFTER)
             except httpx.HTTPStatusError:
                 raise
             except httpx.TransportError as e:
                 last = e
-            if attempt < attempts - 1:
-                _sleep(BACKOFF * 2**attempt)
+            if attempt < ATTEMPTS - 1:
+                _sleep(delay)
         assert last is not None
         raise last
 
@@ -117,8 +124,13 @@ class ImfWeo:
             if m.get("dataset") == "WEO" and (s := _clean(m.get("source")))
         )
         vintage = sources.most_common(1)[0][0] if sources else None
+        warnings = []
+        if failed:
+            listed = ", ".join(failed[:10]) + (", ..." if len(failed) > 10 else "")
+            warnings.append(f"incomplete: {len(failed)} indicators failed: {listed}")
         return ParseResult(
-            rows=self._rows(indicators, data), complete=not failed, indicators=metas, vintage=vintage
+            rows=self._rows(indicators, data), complete=not failed, indicators=metas, vintage=vintage,
+            warnings=warnings,
         )
 
     def _rows(self, indicators: dict, data: dict) -> Iterator[RawRow]:

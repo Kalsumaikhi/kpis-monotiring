@@ -140,11 +140,13 @@ def _fail(session: Session, run_id: int, e: Exception) -> Run:
     return run
 
 
-def _finish(session: Session, run: Run, status: str, diff: DiffResult, metas, vintage) -> None:
+def _finish(session: Session, run: Run, status: str, diff: DiffResult, metas, vintage, warnings=None) -> None:
     run.status = status
     run.rows_total = diff.total
     run.added, run.altered, run.removed = diff.added, diff.altered, diff.removed
     run.vintage = vintage
+    if warnings:
+        run.error = "; ".join(warnings)[:2000]
     run.finished_at = _now()
     _upsert_indicators(session, run.source_id, metas)
     if status != "suspect_pending":
@@ -217,7 +219,7 @@ def run_source(
             else:
                 apply_diff(session, source.id, run_id, parsed.complete, record_changes=True)
                 status = "ok"
-            _finish(session, run, status, diff, parsed.indicators, parsed.vintage)
+            _finish(session, run, status, diff, parsed.indicators, parsed.vintage, parsed.warnings)
         except Exception as e:  # noqa: BLE001
             run = _fail(session, run_id, e)
             _notify(session, run, notifier)
@@ -251,7 +253,7 @@ def approve_run(session_factory: SessionFactory, run_id: int, notifier: Notifier
             stage_rows(session, _canonical_rows(parsed.rows))
             diff = compute_diff(session, source.id, parsed.complete)
             apply_diff(session, source.id, run.id, parsed.complete, record_changes=True)
-            _finish(session, run, "ok", diff, parsed.indicators, parsed.vintage)
+            _finish(session, run, "ok", diff, parsed.indicators, parsed.vintage, parsed.warnings)
         except Exception:
             session.rollback()
             raise

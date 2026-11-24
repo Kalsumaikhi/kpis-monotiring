@@ -213,3 +213,14 @@ def test_prune_keeps_newest_and_spares_suspect(env, db_session, tmp_path):
     assert [Path(r.raw_path).exists() if r.raw_path else None for r in runs] == [
         None, True, None, True, True,
     ]
+
+
+def test_parse_warnings_stored_in_run_error(env, db_session):
+    src, conn, sf = env
+    conn.rows = [raw("AT", "2020", 1)]
+    pipeline.run_source(sf, "fake")
+    conn.rows = [raw("AT", "2020", 2)]
+    conn.warnings = ["incomplete: 1 indicators failed: X"]
+    run = pipeline.run_source(sf, "fake")
+    assert run.status == "ok"
+    assert "incomplete: 1 indicators failed: X" in run.error

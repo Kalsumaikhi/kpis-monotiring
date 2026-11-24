@@ -87,6 +87,7 @@ class FakeConnector:
         self.complete = complete
         self.fail_download = fail_download
         self.fail_parse_after = fail_parse_after
+        self.warnings = []
 
     def download(self, client, dest):
         if self.fail_download:
@@ -105,7 +106,7 @@ class FakeConnector:
         return ParseResult(
             rows=gen(), complete=self.complete,
             indicators=[IndicatorMeta(code="i", name="Indicator I", unit="u")],
-            vintage="v1",
+            vintage="v1", warnings=list(self.warnings),
         )
 
 
