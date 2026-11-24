@@ -77,5 +77,5 @@ TEST_DATABASE_URL=postgresql+psycopg://kpi:kpi@localhost:5432/kpi_test uv run py
 ## Data and licensing
 
 - **World Bank WDI**: CC BY 4.0. Attribute the World Bank.
-- **SIPRI Military Expenditure Database**: free for non-commercial, fair-use purposes with attribution ("Information from the Stockholm International Peace Research Institute (SIPRI) Military Expenditure Database, https://doi.org/10.55163/CQGC9685"). Commercial use, including internal tools for business advantage, needs a SIPRI licence. See the SIPRI terms and conditions.
+- **SIPRI Military Expenditure Database**: free to download, cite and use for statistical or analytical purposes under its fair-use policy: non-commercial use and reproducing less than 10 per cent of the data set. Attribution is required ("Information from the Stockholm International Peace Research Institute (SIPRI) Military Expenditure Database, https://doi.org/10.55163/CQGC9685"). Commercial use, including internal tools for business advantage, needs a SIPRI licence. See the SIPRI terms and conditions.
 - **IMF WEO**: see the IMF terms of use (imf.org copyright page) before redistributing the data.
