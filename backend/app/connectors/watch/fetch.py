@@ -263,7 +263,8 @@ def fetch_target(client: httpx.Client, url: str, use_browser: bool = False,
     navigation; everything else the browser loads is policed by the proxy).
 
     A `credential` is sent only over https and only to the original host (same port) on
-    every hop; a hop elsewhere is fetched without it. Error text and the body are scrubbed
+    every hop; a hop elsewhere is fetched without it (a query key echoed in a Location is
+    stripped before every hop). Error text and the body are scrubbed
     of the secret before they leave this function."""
     res = _fetch_target(client, url, use_browser, state or FetchState(), credential)
     if credential is not None:
@@ -282,6 +283,9 @@ def _fetch_target(client, url, use_browser, state, credential) -> FetchResult:
         if urlsplit(url).scheme != "https":
             return FetchResult("error", error=NEEDS_HTTPS)
     for hop in range(MAX_REDIRECTS + 1):
+        # A Location may echo `param_name=<secret>`; never follow that as-is. apply() puts
+        # the key back on keyed hops only.
+        url = creds.strip_query_secret(credential, url)
         parts = urlsplit(url)
         if parts.scheme not in ("http", "https") or not parts.hostname:
             return FetchResult("error", error="invalid URL")

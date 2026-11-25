@@ -12,7 +12,9 @@ import binascii
 import hashlib
 import re
 from dataclasses import dataclass, field
-from urllib.parse import parse_qsl, quote, quote_plus, urlencode, urlsplit, urlunsplit
+from urllib.parse import (
+    parse_qsl, quote, quote_plus, unquote, unquote_plus, urlencode, urlsplit, urlunsplit,
+)
 
 from cryptography.fernet import Fernet, InvalidToken
 from sqlalchemy import func, select, update
@@ -90,6 +92,29 @@ def apply(cred: Credential, url: str, headers: dict) -> tuple[str, dict]:
         value = f"{cred.prefix} {cred.secret}" if cred.prefix else cred.secret
         headers[cred.header_name or "Authorization"] = value
     return url, headers
+
+
+def strip_query_secret(cred: Credential | None, url: str) -> str:
+    """`url` without any `param_name=<secret>` pair of a query key (value compared decoded,
+    with and without '+' as space); other parameters keep their original spelling. Used on
+    every redirect hop so a Location that echoes the key is not followed as-is to a host
+    that must not get it; apply() adds the key back on hops that may carry it."""
+    if cred is None or cred.kind != "query" or not cred.param_name or not cred.secret:
+        return url
+    parts = urlsplit(url)
+    if not parts.query:
+        return url
+
+    def carries_secret(seg: str) -> bool:
+        k, _, v = seg.partition("=")
+        return (unquote_plus(k) == cred.param_name
+                and cred.secret in (unquote(v), unquote_plus(v)))
+
+    segs = parts.query.split("&")
+    kept = [s for s in segs if not carries_secret(s)]
+    if len(kept) == len(segs):
+        return url
+    return urlunsplit(parts._replace(query="&".join(kept)))
 
 
 _HEX = "0123456789abcdefABCDEF"

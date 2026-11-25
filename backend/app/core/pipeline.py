@@ -336,11 +336,9 @@ class _KeyState:
         for k, v in headers.items():  # strip only what carries our secret
             if request.headers.get(k) == v:
                 del request.headers[k]
-        if self.cred.kind == "query" and self.cred.param_name:
-            params = [(k, v) for k, v in request.url.params.multi_items()
-                      if not (k == self.cred.param_name and v == self.cred.secret)]
-            if len(params) != len(request.url.params.multi_items()):
-                request.url = request.url.copy_with(params=params)
+        stripped = creds.strip_query_secret(self.cred, str(request.url))
+        if stripped != str(request.url):
+            request.url = httpx.URL(stripped)
 
     def on_response(self, response: httpx.Response) -> None:
         if response.request.extensions.get("kpi_keyed") and response.status_code in (401, 403) \

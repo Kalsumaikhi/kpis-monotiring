@@ -98,6 +98,24 @@ def test_query_key_and_redirect_to_other_host_drops_key(env, db_session):
 
 
 @respx.mock
+def test_query_key_echoed_in_cross_host_location_is_stripped(env, db_session):
+    src, conn, sf = env
+    secret = "S3cr/et+k"
+    cred = mk_cred(db_session, kind="query", header_name=None, param_name="apikey", secret=secret)
+    src.credential_id = cred.id
+    db_session.flush()
+    conn.urls = ("https://api.example.com/a",)
+    respx.get("https://api.example.com/a").mock(return_value=httpx.Response(
+        302, headers={"location": f"https://cdn.example.org/f?y=2&apikey={secret}"}))
+    respx.get(url__startswith="https://cdn.example.org/f").mock(return_value=httpx.Response(200, text="ok"))
+    run = pipeline.run_source(sf, "fake")
+    assert run.status == "baseline", run.error
+    last = str(respx.calls[-1].request.url)
+    assert respx.calls[-1].request.url.host == "cdn.example.org"
+    assert "apikey" not in last and "S3cr" not in last and "y=2" in last
+
+
+@respx.mock
 def test_source_without_hosts_ignores_key(env, db_session):
     src, conn, sf = env
     conn.credential_hosts = ()

@@ -120,6 +120,58 @@ def test_key_dropped_on_cross_host_redirect():
         assert "Authorization" not in req.headers and "api_key" not in req.url.params
 
 
+ECHO = "S3cr/et+k"
+
+
+@respx.mock
+@pytest.mark.parametrize("raw", ["S3cr/et+k", "S3cr%2Fet%2Bk", "S3cr%2fet%2bk"])
+def test_query_key_echoed_in_cross_host_location_is_stripped(raw):
+    robots()
+    respx.get("https://a.com/x").mock(return_value=httpx.Response(
+        302, headers={"location": f"https://b.com/x?z=1&api_key={raw}"}))
+    b = respx.get(url__startswith="https://b.com/x").mock(return_value=httpx.Response(200, text="ok"))
+    res = fetch("https://a.com/x", cred_obj("query", param_name="api_key", secret=ECHO))
+    assert res.status == "ok"
+    sent = str(b.calls[0].request.url)
+    assert "api_key" not in sent and "z=1" in sent
+    for call in respx.calls:
+        if call.request.url.host != "a.com":
+            assert ECHO not in str(call.request.url) and "S3cr" not in str(call.request.url)
+
+
+@respx.mock
+def test_query_key_echoed_in_https_to_http_same_host_location_is_stripped():
+    robots()
+    respx.get("https://a.com/x").mock(return_value=httpx.Response(
+        302, headers={"location": f"http://a.com/y?api_key={ECHO}"}))
+    respx.get("http://a.com/robots.txt").mock(return_value=httpx.Response(404))
+    y = respx.get(url__startswith="http://a.com/y").mock(return_value=httpx.Response(200, text="ok"))
+    assert fetch("https://a.com/x", cred_obj("query", param_name="api_key", secret=ECHO)).status == "ok"
+    for call in respx.calls:
+        if call.request.url.scheme == "http":
+            assert "S3cr" not in str(call.request.url)
+    assert "api_key" not in str(y.calls[0].request.url)
+
+
+@respx.mock
+def test_query_key_echoed_on_same_host_https_hop_sent_once():
+    robots()
+    respx.get("https://a.com/x").mock(return_value=httpx.Response(
+        302, headers={"location": f"https://a.com/y?api_key={ECHO}"}))
+    y = respx.get(url__startswith="https://a.com/y").mock(return_value=httpx.Response(200, text="ok"))
+    assert fetch("https://a.com/x", cred_obj("query", param_name="api_key", secret=ECHO)).status == "ok"
+    assert y.calls[0].request.url.params.get_list("api_key") == [ECHO]
+
+
+def test_strip_query_secret_leaves_other_params_alone():
+    c = cred_obj("query", param_name="api_key", secret=ECHO)
+    assert creds.strip_query_secret(c, "https://b.com/x?a=%2F&api_key=S3cr/et+k&b=2") == \
+        "https://b.com/x?a=%2F&b=2"
+    assert creds.strip_query_secret(c, "https://b.com/x?api_key=other") == "https://b.com/x?api_key=other"
+    assert creds.strip_query_secret(cred_obj(), "https://b.com/x?api_key=S3cr/et+k") == \
+        "https://b.com/x?api_key=S3cr/et+k"
+
+
 @respx.mock
 def test_key_kept_on_same_host_redirect():
     robots()
