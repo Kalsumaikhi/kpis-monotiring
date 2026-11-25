@@ -18,10 +18,10 @@ export function fmtDims(dims: Record<string, unknown> | null | undefined): strin
   return entries.length ? entries.map(([k, v]) => `${k}=${String(v)}`).join(', ') : '—'
 }
 
-/** Numeric strings with >=5 integer digits get thousands separators; years/codes stay raw. */
+/** Numeric strings with >=5 integer digits (no leading zero) get thousands separators; years/codes stay raw. */
 export function fmtValue(v: string | null | undefined): string {
   if (v === null || v === undefined) return '—'
-  const m = /^(-?)(\d{5,})(\.\d+)?$/.exec(v)
+  const m = /^(-?)([1-9]\d{4,})(\.\d+)?$/.exec(v)
   if (!m) return v
   return m[1] + m[2].replace(/\B(?=(\d{3})+(?!\d))/g, ',') + (m[3] ?? '')
 }

@@ -205,4 +205,78 @@ describe('RunDetailPage', () => {
     expect(w.find('span.old').attributes('title')).toBe('11000000')
     w.unmount()
   })
+
+  it('formats: leading-zero codes stay raw', async () => {
+    const { fmtValue } = await import('../lib/format')
+    expect(fmtValue('01234')).toBe('01234')
+    expect(fmtValue('11000000')).toBe('11,000,000')
+    expect(fmtValue('-1234567.25')).toBe('-1,234,567.25')
+    expect(fmtValue('2020')).toBe('2020')
+  })
+
+  it('discards a stale run response after navigating', async () => {
+    let release1!: (v: unknown) => void
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/api/runs/1') return new Promise((r) => { release1 = r })
+      if (path === '/api/runs/2') return Promise.resolve(run({ id: 2, source: 'two', status: 'ok' }))
+      return Promise.resolve(path.endsWith('/changes') ? { items: [], total: 0 } : [])
+    })
+    const router = mkRouter()
+    await router.push('/runs/1')
+    const w = mount(RunDetailPage, { global: { plugins: [router] } })
+    await flushPromises()
+    await router.push('/runs/2')
+    await flushPromises()
+    release1(run({ id: 1, source: 'one', status: 'ok' }))
+    await flushPromises()
+    expect(w.text()).toContain('Run #2')
+    expect(w.text()).not.toContain('Run #1')
+    w.unmount()
+  })
+
+  it('discards a stale changes response after a newer filter request', async () => {
+    const pending: ((v: unknown) => void)[] = []
+    apiGet.mockImplementation((path: string, params?: Record<string, unknown>) => {
+      if (path === '/api/runs/7') return Promise.resolve(run({ status: 'ok' }))
+      if (path === '/api/runs/7/changes') {
+        if (params?.country === 'AT') return Promise.resolve({ items: [ch({ indicator: 'NEWER' })], total: 1 })
+        return new Promise((r) => pending.push(r))
+      }
+      return Promise.resolve([])
+    })
+    const router = mkRouter()
+    await router.push('/runs/7')
+    const w = mount(RunDetailPage, { global: { plugins: [router] } })
+    await flushPromises()
+    await w.get('#c-cty').setValue('AT')
+    await w.get('#c-cty').trigger('change')
+    await flushPromises()
+    pending[0]({ items: [ch({ indicator: 'OLDER' })], total: 1 })
+    await flushPromises()
+    expect(w.text()).toContain('NEWER')
+    expect(w.text()).not.toContain('OLDER')
+    w.unmount()
+  })
+
+  it('a hung poll request is aborted and the deadline still fires', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'] })
+    let signals: (AbortSignal | undefined)[] = []
+    apiGet.mockImplementation((path: string, _p?: unknown, signal?: AbortSignal) => {
+      if (path === '/api/runs/7') {
+        if (apiGet.mock.calls.filter((c) => c[0] === '/api/runs/7').length === 1) return Promise.resolve(run({ status: 'approve_queued' }))
+        signals.push(signal)
+        return new Promise(() => {})
+      }
+      return Promise.resolve(path.endsWith('/changes') ? { items: [], total: 0, pending: true } : [])
+    })
+    const router = mkRouter()
+    await router.push('/runs/7')
+    const w2 = mount(RunDetailPage, { global: { plugins: [router] } })
+    await flushPromises()
+    await vi.advanceTimersByTimeAsync(40000)
+    expect(signals[0]?.aborted).toBe(true)
+    await vi.advanceTimersByTimeAsync(10 * 60 * 1000)
+    expect(w2.text()).toMatch(/Lost connection|Still applying/)
+    w2.unmount()
+  })
 })

@@ -14,6 +14,7 @@ import { absoluteTime, fmtDims, fmtNum, fmtValue, relativeTime } from '../lib/fo
 
 const PAGE_SIZE = 50
 const POLL_MS = 5000
+const POLL_REQUEST_MAX_MS = 30 * 1000
 const POLL_MAX_MS = 10 * 60 * 1000
 
 const route = useRoute()
@@ -40,6 +41,9 @@ const busy = ref(false)
 const pollNote = ref<string | null>(null)
 let pollTimer: ReturnType<typeof setInterval> | null = null
 let pollInFlight = false
+let pollStartedAt = 0
+let pollTick = 0
+let pollAbort: AbortController | null = null
 let pollFailures = 0
 let runSeq = 0
 let changesSeq = 0
@@ -58,23 +62,24 @@ const columns: Column[] = [
 ]
 const SIGN: Record<ChangeType, string> = { added: '+', altered: '~', removed: '−' }
 
-/** Returns true on success. With `keep`, a failure leaves the current run on screen. */
-async function loadRun(keep = false): Promise<boolean> {
+type LoadResult = 'ok' | 'fail' | 'stale'
+/** With `keep`, a failure leaves the current run on screen. 'stale' = superseded by a newer request. */
+async function loadRun(keep = false, signal?: AbortSignal): Promise<LoadResult> {
   const mine = ++runSeq
   try {
-    const res = await apiGet<RunDetail>(`/api/runs/${runId.value}`)
-    if (mine !== runSeq) return false
+    const res = await apiGet<RunDetail>(`/api/runs/${runId.value}`, undefined, signal)
+    if (mine !== runSeq) return 'stale'
     run.value = res
     loadError.value = null
     notFound.value = false
-    return true
+    return 'ok'
   } catch (e) {
-    if (mine !== runSeq) return false
-    if (keep && run.value) return false
+    if (mine !== runSeq) return 'stale'
+    if (keep && run.value) return 'fail'
     run.value = null
     if (e instanceof ApiError && e.status === 404) notFound.value = true
     else loadError.value = e instanceof ApiError ? e.detail : 'Could not load this run'
-    return false
+    return 'fail'
   }
 }
 
@@ -128,6 +133,9 @@ function stopPolling() {
   if (pollTimer !== null) clearInterval(pollTimer)
   pollTimer = null
   pollInFlight = false
+  pollTick++
+  pollAbort?.abort()
+  pollAbort = null
 }
 
 function startPolling() {
@@ -137,17 +145,31 @@ function startPolling() {
   const id = runId.value
   const deadline = Date.now() + POLL_MAX_MS
   pollTimer = setInterval(async () => {
-    if (pollInFlight) return
     if (Date.now() >= deadline) {
       stopPolling()
       pollNote.value = 'Still applying — refresh later'
       return
     }
+    if (pollInFlight) {
+      if (Date.now() - pollStartedAt < POLL_REQUEST_MAX_MS) return
+      pollAbort?.abort() // hung request: give up on it and count a failure
+      pollTick++
+      pollInFlight = false
+      if (++pollFailures >= 3) {
+        stopPolling()
+        pollNote.value = 'Lost connection — refresh to check status'
+        return
+      }
+    }
+    const tick = ++pollTick
     pollInFlight = true
-    const ok = await loadRun(true)
-    if (id !== runId.value || pollTimer === null) return
+    pollStartedAt = Date.now()
+    pollAbort = new AbortController()
+    const result = await loadRun(true, pollAbort.signal)
+    if (id !== runId.value || tick !== pollTick) return
     pollInFlight = false
-    if (!ok) {
+    if (result === 'stale') return
+    if (result === 'fail') {
       if (++pollFailures >= 3) {
         stopPolling()
         pollNote.value = 'Lost connection — refresh to check status'

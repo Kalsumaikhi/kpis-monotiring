@@ -75,8 +75,8 @@ async function request<T>(url: string, init: RequestInit & { headers: Record<str
   return body as T
 }
 
-export function apiGet<T>(path: string, params?: Params): Promise<T> {
-  return request<T>(withParams(path, params), { method: 'GET', headers: { Accept: 'application/json' } })
+export function apiGet<T>(path: string, params?: Params, signal?: AbortSignal): Promise<T> {
+  return request<T>(withParams(path, params), { method: 'GET', headers: { Accept: 'application/json' }, signal })
 }
 
 export function apiSend<T>(method: 'POST' | 'PATCH' | 'PUT' | 'DELETE', path: string, body?: unknown): Promise<T> {
