@@ -1,8 +1,12 @@
 <script setup lang="ts">
-// Placeholder: replaced by a later task.
-import Placeholder from './Placeholder.vue'
+import BuiltinSources from './settings/BuiltinSources.vue'
+import CustomSources from './settings/CustomSources.vue'
 </script>
 
 <template>
-  <Placeholder title="Settings" />
+  <div class="page">
+    <div class="page-head"><h1>Settings</h1></div>
+    <BuiltinSources />
+    <CustomSources />
+  </div>
 </template>
