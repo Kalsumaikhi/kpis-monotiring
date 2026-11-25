@@ -23,6 +23,7 @@ const NO_KEY_PANEL = "Keys are encrypted with KPI_SECRET_KEY, which isn't set. A
 async function load() {
   loading.value = true
   error.value = null
+  unavailable.value = false // neutral unless the status says otherwise
   try {
     try {
       const st = await apiGet<{ configured?: boolean }>('/api/credentials/status')

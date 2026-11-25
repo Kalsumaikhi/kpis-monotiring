@@ -57,6 +57,32 @@ describe('KeysCard', () => {
     w.unmount()
   })
 
+  it('never renders a secret anywhere in the card', async () => {
+    const SENTINEL = 'sentinel-s3cr3t-value'
+    const w = await card([key(), key({ id: 2, name: 'Q', kind: 'query', header_name: null, prefix: null, param_name: 'k' })])
+    expect(w.html()).not.toContain(SENTINEL)
+    expect(w.html()).not.toMatch(/secret"\s*:/)
+    expect(w.text()).not.toContain(SENTINEL)
+    expect(w.findAll('input[type=password]')).toHaveLength(0) // no secret input until a form is opened
+    w.unmount()
+  })
+
+  it('secret input is empty after save, and again when the form is re-opened', async () => {
+    const w = await card([])
+    apiSend.mockResolvedValue({})
+    await w.get('[data-test=add-key]').trigger('click')
+    await w.get('#kf-name').setValue('New')
+    await w.get('#kf-secret').setValue('sentinel-s3cr3t-value')
+    const first = w.get('#kf-secret').element as HTMLInputElement
+    await w.get('form').trigger('submit')
+    await flushPromises()
+    expect(first.value).toBe('')
+    expect(w.html()).not.toContain('sentinel-s3cr3t-value')
+    await w.get('[data-test=add-key]').trigger('click')
+    expect((w.get('#kf-secret').element as HTMLInputElement).value).toBe('')
+    w.unmount()
+  })
+
   it('clears the secret after save and sends it only in the body', async () => {
     const w = await card([])
     apiSend.mockResolvedValue({})
