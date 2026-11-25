@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.connectors.base import IndicatorMeta
-from app.connectors.registry import get_connector
+from app.connectors.registry import resolve_connector
 from app.core import raw_store
 from app.core.canonical import to_canonical
 from app.core.diff import DiffResult, apply_diff, compute_diff, stage_rows
@@ -220,11 +220,11 @@ def run_source(
     run_id: int | None = None,
 ) -> Run:
     """Run one source. With run_id, reuse that queued Run row (keeping its trigger)."""
-    connector = get_connector(slug)
     settings = get_settings()
     session = session_factory()
     release = None
     try:
+        connector = resolve_connector(session, slug)  # KeyError for unknown slug, before any row
         source = session.scalars(select(Source).where(Source.slug == slug)).one()
         release = _acquire_source_lock(session, source.id)  # SourceBusyError before any row
         if run_id is not None:
@@ -321,7 +321,7 @@ def approve_run(session_factory: SessionFactory, run_id: int, notifier: Notifier
         if not run.raw_path:
             raise ValueError(f"run {run_id} has no raw file")
         source = session.get(Source, run.source_id)
-        connector = get_connector(source.slug)
+        connector = resolve_connector(session, source.slug)
         try:
             parsed = connector.parse(Path(run.raw_path))
             stage_rows(session, _canonical_rows(parsed.rows))
@@ -385,7 +385,7 @@ def preview_changes(
         raise ValueError(f"run {run_id} has no raw file")
     source = session.get(Source, run.source_id)
     source_id, raw_path = source.id, Path(run.raw_path)
-    connector = get_connector(source.slug)
+    connector = resolve_connector(session, source.slug)
     try:
         if not raw_path.exists():
             raise PreviewUnavailableError("raw file unavailable for preview")

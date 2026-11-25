@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from sqlalchemy import text
-from sqlalchemy.orm import Session
+from sqlalchemy import select, text
+from sqlalchemy.orm import Session, sessionmaker
 
 from app.connectors.base import Connector
 
@@ -13,6 +13,21 @@ def get_connector(slug: str) -> Connector:
         return CONNECTORS[slug]
     except KeyError:
         raise KeyError(f"unknown connector: {slug}") from None
+
+
+def resolve_connector(session: Session, slug: str) -> Connector:
+    """Static connector by slug, else a WatchConnector for a DB source with access='watch'."""
+    if slug in CONNECTORS:
+        return CONNECTORS[slug]
+    from app.connectors.watch.connector import WatchConnector
+    from app.models import Source
+
+    row = session.execute(
+        select(Source.id, Source.name, Source.access).where(Source.slug == slug)
+    ).first()
+    if row is None or row.access != "watch":
+        raise KeyError(f"unknown connector: {slug}")
+    return WatchConnector(row.id, slug, row.name, sessionmaker(bind=session.get_bind()))
 
 
 def sync_sources(session: Session) -> None:

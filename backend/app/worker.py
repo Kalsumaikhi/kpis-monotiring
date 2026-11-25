@@ -11,7 +11,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from sqlalchemy import select, update
 
-from app.connectors.registry import CONNECTORS, sync_sources
+from app.connectors.registry import resolve_connector, sync_sources
 from app.core.pipeline import (
     Notifier, RunNotQueuedError, SessionFactory, SourceBusyError, _acquire_source_lock,
     _safe_error, run_source,
@@ -46,7 +46,9 @@ def reload_jobs(scheduler: BackgroundScheduler, session_factory: SessionFactory,
         sources = session.scalars(select(Source).where(Source.enabled.is_(True))).all()
         wanted: dict[str, str] = {}
         for s in sources:
-            if s.slug not in CONNECTORS:
+            try:
+                resolve_connector(session, s.slug)
+            except KeyError:
                 log.warning("source %s has no registered connector; skipping", s.slug)
                 continue
             wanted[s.slug] = s.cron
