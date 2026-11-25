@@ -249,6 +249,29 @@ Usage rules (from contrast checks, WCAG AA 4.5:1 for text):
 - Status colours outside the palette (needed for failed / held runs): an amber for "suspect — pending review" and a red for "failed", chosen to sit with the greens; "ok/added" uses Mid Green. Status is never shown by colour alone (icon + label too).
 - Chart categories beyond the four greens: use tints/shades of the palette for related series; for change types use added = Mid Green, altered = amber, removed = red.
 
+### 5.10 Keys for licensed sources (added 2026-11-26, approved)
+
+**Why:** the user holds licences/API keys for some sources and wants to enter them manually so the tool sends them when fetching. Approach chosen (option 2 of 2): keys are stored centrally and **picked per custom KPI and per source** (rejected: one key per website auto-applied).
+
+- **Key store (Settings → Keys):** name (unique) + type:
+  - `header`: header name (default `Authorization`) + optional prefix (e.g. `Bearer`);
+  - `query`: parameter name (e.g. `api_key`);
+  - `basic`: username + password.
+
+  Secret values are **write-only**: after saving the UI shows "Set ✓" and last used; replace or delete only. Encrypted at rest with Fernet using the install secret `KPI_SECRET_KEY`. If it is unset, the Keys API returns 503 with setup instructions and nothing is stored.
+- **Assignment:**
+  - Custom KPI form: a "Key" dropdown (default None); Test link uses the chosen key.
+  - Each non-watch source in Settings: a "Key" dropdown, used by connectors that declare which hosts the key is for.
+  - Import sheet: optional 4th column `Key name`; an unknown name makes that row invalid in the preview.
+- **Safety:**
+  - Keys are sent **only over https**; a KPI with a key and an http link is refused (422).
+  - A key is sent only to the KPI link's host; it is kept on same-host redirects and dropped on cross-host ones.
+  - Redacted in logs, run errors, previews, snapshots, raw files and Mattermost.
+  - A key that is in use can't be deleted (409; the API lists what uses it).
+  - HTTP 401/403 with a key → target/source status `key_rejected`, named in the incomplete-fetch warning.
+  - Keys are not supported with "Needs a browser" (422 with an explanation) in this version.
+- **Out of scope:** OAuth/expiring tokens, browser logins for paid downloads.
+
 ## 6. Constraints
 
 - Data volume: millions of data points (WDI alone ≈ 1,400 indicators × 217 economies × 60+ years). Bulk inserts/upserts and set-based diffing in Postgres (e.g. load into a staging table and diff with SQL) rather than row-by-row Python.
