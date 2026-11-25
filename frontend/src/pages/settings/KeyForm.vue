@@ -17,6 +17,12 @@ const username = ref(props.keyItem?.username ?? '')
 // Write-only: lives only in this ref, is cleared right after the request, and is never logged or stored.
 const secret = ref('')
 const showSecret = ref(false)
+const secretEl = ref<HTMLInputElement | null>(null)
+// Clear the DOM value as well: a parent that unmounts this form right away never re-renders the bound value.
+function clearSecret() {
+  secret.value = ''
+  if (secretEl.value) secretEl.value.value = ''
+}
 const saving = ref(false)
 const error = ref('')
 const first = ref<HTMLElement | null>(null)
@@ -29,9 +35,9 @@ const kindOk = computed(() => {
 })
 const valid = computed(() => !(props.unavailable && (secretRequired.value || secret.value !== '')) && (props.replace ? true : name.value.trim() !== '' && kindOk.value) && (!secretRequired.value || secret.value !== ''))
 
-onBeforeUnmount(() => { secret.value = '' })
+onBeforeUnmount(clearSecret)
 function cancel() {
-  secret.value = ''
+  clearSecret()
   showSecret.value = false
   emit('cancel')
 }
@@ -67,12 +73,13 @@ async function save() {
       const body: KeyIn = { name: name.value.trim(), kind: kind.value, ...fields(), secret: typed }
       await apiSend('POST', '/api/credentials', body)
     }
+    clearSecret()
     emit('saved')
   } catch (e) {
     if (e instanceof ApiError && e.status === 503) emit('unavailable')
     error.value = e instanceof ApiError ? e.detail : 'Could not save'
   } finally {
-    secret.value = ''
+    clearSecret()
     showSecret.value = false
     saving.value = false
   }
@@ -129,7 +136,7 @@ const title = computed(() => (props.replace ? `Replace secret for ${props.keyIte
       </label>
       <div class="secret">
         <input
-          id="kf-secret" :ref="(el) => { if (replace) first = el as HTMLElement }" v-model="secret" :type="showSecret ? 'text' : 'password'"
+          id="kf-secret" :ref="(el) => { secretEl = el as HTMLInputElement | null; if (replace) first = el as HTMLElement }" v-model="secret" :type="showSecret ? 'text' : 'password'"
           class="mono" autocomplete="new-password" autocapitalize="off" spellcheck="false" :required="secretRequired" :disabled="unavailable" data-test="secret"
         />
         <button type="button" class="btn secondary" aria-label="Show secret" aria-controls="kf-secret" :aria-pressed="showSecret" data-test="toggle-secret" @click="showSecret = !showSecret">{{ showSecret ? 'Hide' : 'Show' }}</button>
