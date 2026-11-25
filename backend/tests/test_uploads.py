@@ -80,3 +80,16 @@ def test_upload_creates_queued_held_run(client, manual, db_session, session_fact
     assert lst["items"][0]["run_status"] == "suspect_pending"
     assert client.get("/api/sources?access=manual").json()[0]["slug"] == "up"
     assert client.get("/api/sources?access=watch").json() == []
+
+
+def test_upload_409_when_a_check_is_already_queued(client, manual, db_session, session_factory):
+    from app.config import get_settings as gs
+    db_session.add(Run(source_id=manual.id, status="queued", trigger="manual"))
+    db_session.commit()
+    r = post(client)
+    assert r.status_code == 409
+    assert r.json() == {"detail": "a check for this source is already queued"}
+    raw = Path(gs().raw_dir)
+    assert [p for p in raw.rglob("*") if p.is_file()] == []  # the saved file was removed
+    assert db_session.query(Upload).count() == 0
+    assert db_session.query(Run).filter(Run.source_id == manual.id).count() == 1

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_session
@@ -16,6 +17,7 @@ router = APIRouter()
 
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 _CHUNK = 1024 * 1024
+QUEUED_CONFLICT = "a check for this source is already queued"
 
 
 @router.post("/uploads", status_code=202)
@@ -37,24 +39,33 @@ def create_upload(
 
     run = Run(source_id=src.id, status="queued", trigger="upload")
     session.add(run)
-    session.flush()  # the id names the raw file
-    dest = raw_store.path_for(src.slug, run.id, connector.raw_suffix)
-    size = 0
+    dest = None
     try:
-        with dest.open("wb") as out:
-            while chunk := file.file.read(_CHUNK):
-                size += len(chunk)
-                if size > MAX_UPLOAD_BYTES:
-                    raise HTTPException(413, "file too large (max 50 MB)")
-                out.write(chunk)
-    except BaseException:
-        dest.unlink(missing_ok=True)
+        session.flush()  # the id names the raw file
+        dest = raw_store.path_for(src.slug, run.id, connector.raw_suffix)
+        _save(file, dest)
+        run.raw_path = str(dest)
+        session.add(Upload(source_id=src.id, who=who, filename=file.filename or "upload",
+                           run_id=run.id))
+        session.commit()
+    except BaseException as e:
+        if dest is not None:
+            dest.unlink(missing_ok=True)
         session.rollback()
+        if isinstance(e, IntegrityError) and "uq_runs_one_queued_per_source" in str(e.orig):
+            raise HTTPException(409, QUEUED_CONFLICT) from None
         raise
-    run.raw_path = str(dest)
-    session.add(Upload(source_id=src.id, who=who, filename=file.filename or "upload", run_id=run.id))
-    session.commit()
     return {"run_id": run.id}
+
+
+def _save(file: UploadFile, dest) -> None:
+    size = 0
+    with dest.open("wb") as out:
+        while chunk := file.file.read(_CHUNK):
+            size += len(chunk)
+            if size > MAX_UPLOAD_BYTES:
+                raise HTTPException(413, "file too large (max 50 MB)")
+            out.write(chunk)
 
 
 @router.get("/uploads")
