@@ -188,3 +188,52 @@ def test_changes_endpoint_reads_pending(client, env, db_session):
     poll_queued_once(env[2], None)
     r = client.get(f"/api/runs/{run.id}/changes").json()
     assert "pending" not in r and r["total"] == 3
+
+
+def _set_status(db_session, run_id, status):
+    db_session.execute(Run.__table__.update().where(Run.id == run_id).values(status=status))
+    db_session.commit()
+
+
+def test_newer_good_run_supersedes_approve_queued_with_error(env, db_session):
+    _, conn, sf = env
+    run = _held(env)
+    _set_status(db_session, run.id, "approve_queued")
+    conn.rows = [raw(f"C{i}", "2020", i) for i in range(10)]
+    assert pipeline.run_source(sf, "fake").status == "no_change"
+    db_session.expire_all()
+    r = db_session.get(Run, run.id)
+    assert r.status == "superseded"
+    assert r.error == "superseded by a newer run before the approval was applied"
+    assert _n(db_session, PendingChange, run_id=run.id) == 0
+    assert poll_queued_once(sf, None) == 0
+
+
+def test_superseded_suspect_has_error(env, db_session):
+    _, _, sf = env
+    a = _held(env)
+    pipeline.run_source(sf, "fake")
+    db_session.expire_all()
+    assert db_session.get(Run, a.id).error == "superseded by a newer run"
+
+
+def test_prune_spares_approve_queued_raw_file(env, db_session, tmp_path):
+    from app.core import raw_store
+    src, _, _ = env
+    paths = []
+    for status in ("approve_queued", "ok", "ok"):
+        f = tmp_path / f"{len(paths)}.json"
+        f.write_text("x")
+        paths.append(f)
+        db_session.add(Run(source_id=src.id, status=status, raw_path=str(f)))
+    db_session.commit()
+    raw_store.prune(db_session, src.id, 1)  # keeps newest only; oldest is approve_queued
+    assert paths[0].exists() and not paths[1].exists() and paths[2].exists()
+
+
+def test_run_now_allowed_while_approve_queued(client, env, db_session):
+    # Kept behaviour: approve_queued is not an "open" run for run-now; the source lock serialises.
+    src, _, _ = env
+    run = _held(env)
+    _set_status(db_session, run.id, "approve_queued")
+    assert client.post(f"/api/sources/{src.slug}/run").status_code == 202

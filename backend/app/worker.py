@@ -76,7 +76,7 @@ def reload_jobs(scheduler: BackgroundScheduler, session_factory: SessionFactory,
 
 
 def poll_queued_once(session_factory: SessionFactory, notifier: Notifier | None) -> int:
-    """Execute every queued and approve_queued run (oldest first); returns how many were started."""
+    """Execute queued runs and apply approve_queued ones (oldest first); returns how many ran."""
     session = session_factory()
     try:
         queued = session.execute(

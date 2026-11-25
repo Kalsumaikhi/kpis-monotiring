@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Callable, Iterable, Protocol
 
 import httpx
-from sqlalchemy import Engine, delete, func, select, text, update
+from sqlalchemy import Engine, case, delete, func, select, text, update
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
@@ -196,7 +196,15 @@ def _supersede_held(session: Session, source_id: int, before_id: int | None = No
         q = q.where(Run.id < before_id)
     if except_id is not None:
         q = q.where(Run.id != except_id)
-    ids = session.execute(q.values(status="superseded").returning(Run.id)).scalars().all()
+    # CASE reads the pre-update status, so the message says whether an approval was lost.
+    msg = case(
+        (Run.status == "approve_queued",
+         "superseded by a newer run before the approval was applied"),
+        else_="superseded by a newer run",
+    )
+    ids = session.execute(
+        q.values(status="superseded", error=msg).returning(Run.id)
+    ).scalars().all()
     if ids:
         session.execute(delete(PendingChange).where(PendingChange.run_id.in_(ids)))
 
@@ -326,7 +334,7 @@ def approve_run(session_factory: SessionFactory, run_id: int, notifier: Notifier
             )
         )
         if run.status not in HELD_STATUSES or latest != run.id:
-            raise ValueError(f"run {run_id} is not the latest suspect_pending run")
+            raise ValueError(f"run {run_id} is not the latest held (suspect_pending/approve_queued) run")
         if not run.raw_path:
             raise ValueError(f"run {run_id} has no raw file")
         source = session.get(Source, run.source_id)

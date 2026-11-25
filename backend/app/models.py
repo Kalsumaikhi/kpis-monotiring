@@ -25,7 +25,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 # Run statuses are stored as plain text (no DB enum) so later tasks can add values.
 RUN_STATUSES = (
     "running", "ok", "no_change", "failed", "suspect_pending",
-    "rejected", "superseded", "baseline", "queued",
+    "rejected", "superseded", "baseline", "queued", "approve_queued",
 )
 CHANGE_TYPES = ("added", "altered", "removed")
 
