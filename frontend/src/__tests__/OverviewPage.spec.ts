@@ -125,9 +125,12 @@ describe('OverviewPage', () => {
   it('error toasts persist, info toasts auto-dismiss', () => {
     vi.useFakeTimers()
     const { show } = useToast()
-    show('ok'); show('bad', 'error')
-    vi.advanceTimersByTime(6000)
-    expect(toasts.value.map((t) => t.message)).toEqual(['bad'])
-    vi.useRealTimers()
+    try {
+      show('ok'); show('bad', 'error')
+      vi.advanceTimersByTime(6000)
+      expect(toasts.value.map((t) => t.message)).toEqual(['bad'])
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

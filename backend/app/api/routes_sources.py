@@ -102,8 +102,8 @@ def list_sources(access: str | None = None, session: Session = Depends(get_sessi
         for r in session.scalars(
             select(Run)
             .ext(distinct_on(Run.source_id))
-            .where(Run.status.in_(("ok", "no_change", "baseline")))
-            .order_by(Run.source_id, Run.id.desc())
+            .where(Run.status.in_(("ok", "no_change", "baseline")), Run.finished_at.is_not(None))
+            .order_by(Run.source_id, Run.finished_at.desc())
         )
     }
     change_stats = {

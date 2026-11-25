@@ -99,6 +99,16 @@ def test_sources_last_success_ignores_running_latest(client, db_session, source)
     assert s["last_success_at"].startswith("2026-11-01T12:00:00")
 
 
+def test_sources_last_success_orders_by_finished_at(client, db_session, source):
+    newer = datetime(2026, 11, 5, 12, tzinfo=timezone.utc)
+    db_session.add(Run(source_id=source.id, status="ok", finished_at=newer))
+    db_session.flush()
+    db_session.add(Run(source_id=source.id, status="ok", finished_at=newer - timedelta(days=3)))
+    db_session.commit()
+    s = client.get("/api/sources").json()[0]
+    assert s["last_success_at"].startswith("2026-11-05T12:00:00")
+
+
 def test_sources_list_source_without_runs(client, source):
     s = client.get("/api/sources").json()[0]
     assert s["last_success_at"] is None

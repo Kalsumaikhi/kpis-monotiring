@@ -38,7 +38,7 @@ function relative(iso: string | null): string {
   for (const [u, s] of units) if (Math.abs(diff) >= s) return rtf.format(Math.round(diff / s), u)
   return 'just now'
 }
-const IN_FLIGHT: Record<string, string> = { running: 'In progress', queued: 'Queued', approve_queued: 'Applying…' }
+const IN_FLIGHT: Record<string, string> = { running: 'In progress', queued: 'Queued', approve_queued: 'Applying…', suspect_pending: 'Needs review' }
 function checkLabel(r: NonNullable<Source['last_run']>): string {
   return r.finished_at ? relative(r.finished_at) : (IN_FLIGHT[r.status] ?? 'not finished')
 }
