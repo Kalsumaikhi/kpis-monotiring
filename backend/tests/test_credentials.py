@@ -63,8 +63,9 @@ def test_secret_encrypted_at_rest(client, db_session):
     {"prefix": "a\nb"},
     {"prefix": "p" * 33},
     {"kind": "basic", "username": "a:b"},
-    {"secret": "a\nb"},
+    {"secret": "a\nbcdefghij"},
     {"secret": "x" * 4097},
+    {"secret": "short"},
     {"kind": "basic"},
     {"kind": "bogus"},
     {"secret": ""},
@@ -244,3 +245,81 @@ def test_redact_url_encoded_forms():
     c = C(secret=sec)
     for form in (sec, quote_plus(sec), quote(sec, safe=""), quote(sec)):
         assert creds.redact(f"x {form} y", c) == "x *** y"
+
+
+def detail(r):
+    return r.json()["detail"]
+
+
+def test_secret_minimum_length(client):
+    r = client.post("/api/credentials", json=body(secret="1234567"))
+    assert r.status_code == 422 and detail(r) == "secret must be at least 8 characters"
+    assert client.post("/api/credentials", json=body(secret="12345678")).status_code == 201
+    cid = client.get("/api/credentials").json()[0]["id"]
+    for bad in ("", "1234567", None):
+        r = client.patch(f"/api/credentials/{cid}", json={"secret": bad})
+        assert r.status_code == 422 and detail(r) == "secret must be at least 8 characters"
+    r = client.post("/api/credentials", json=body(name="long", secret="x" * 4097))
+    assert detail(r) == "secret must be at most 4096 characters"
+
+
+def test_replacing_secret_clears_last_error(client, db_session):
+    cid = client.post("/api/credentials", json=body()).json()["id"]
+    creds.mark_used(db_session, cid, "key rejected (HTTP 401)")
+    used = client.get("/api/credentials").json()[0]["last_used_at"]
+    assert used
+    r = client.patch(f"/api/credentials/{cid}", json={"name": "Renamed"}).json()
+    assert r["last_error"] == "key rejected (HTTP 401)"  # a rename says nothing about the key
+    r = client.patch(f"/api/credentials/{cid}", json={"secret": "brand-new-secret"}).json()
+    assert r["last_error"] is None and r["last_used_at"] == used
+
+
+@pytest.mark.parametrize("payload", [
+    {"secret": "caf\u00e9-secret-1"},
+    {"secret": "tab\there-secret"},
+    {"secret": "line\rbreak-secret"},
+    {"prefix": "Bear\u00e9r"},
+    {"prefix": "Bea\tr"},
+])
+def test_header_keys_must_be_plain_ascii(client, payload):
+    r = client.post("/api/credentials", json=body(**payload))
+    assert r.status_code == 422 and detail(r) == "header keys must be plain ASCII"
+
+
+def test_non_ascii_secret_ok_for_query_and_basic(client):
+    assert client.post("/api/credentials", json=body(
+        name="q", kind="query", param_name="k", secret="caf\u00e9-secret-1")).status_code == 201
+    assert client.post("/api/credentials", json=body(
+        name="b", kind="basic", username="u", secret="caf\u00e9-secret-1")).status_code == 201
+
+
+def test_patch_to_header_checks_stored_secret(client, monkeypatch):
+    q = client.post("/api/credentials", json=body(
+        name="q", kind="query", param_name="k", secret="caf\u00e9-secret-1")).json()
+    r = client.patch(f"/api/credentials/{q['id']}", json={"kind": "header"})
+    assert r.status_code == 422 and detail(r) == "header keys must be plain ASCII"
+    r = client.patch(f"/api/credentials/{q['id']}",
+                     json={"kind": "header", "secret": "caf\u00e9-secret-2"})
+    assert r.status_code == 422 and detail(r) == "header keys must be plain ASCII"
+    # unreadable stored secret: a new one is required
+    monkeypatch.setenv("KPI_SECRET_KEY", Fernet.generate_key().decode())
+    r = client.patch(f"/api/credentials/{q['id']}", json={"kind": "header"})
+    assert r.status_code == 422 and "enter a new secret" in detail(r)
+    r = client.patch(f"/api/credentials/{q['id']}", json={"kind": "header", "secret": "ascii-secret-9"})
+    assert r.status_code == 200 and r.json()["kind"] == "header"
+
+
+def test_422_never_echoes_the_secret(client):
+    secret = "ECHO-ME-NOT-12345"
+    r = client.post("/api/credentials", json={"name": "x", "secret": secret})  # kind missing
+    assert r.status_code == 422 and secret not in r.text
+    r = client.post("/api/credentials", json={"name": "x", "kind": "bogus", "secret": secret})
+    assert r.status_code == 422 and secret not in r.text
+    r = client.post("/api/credentials", content=f'{{"name": "x", "secret": "{secret}"',
+                    headers={"content-type": "application/json"})  # malformed JSON
+    assert r.status_code == 422 and secret not in r.text
+    cid = client.post("/api/credentials", json=body()).json()["id"]
+    r = client.patch(f"/api/credentials/{cid}", json={"kind": "nope", "secret": secret})
+    assert r.status_code == 422 and secret not in r.text
+    assert all("msg" in e and "loc" in e for e in client.post(
+        "/api/credentials", json={"secret": secret}).json()["detail"])

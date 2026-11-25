@@ -27,13 +27,15 @@ const saving = ref(false)
 const error = ref('')
 const first = ref<HTMLElement | null>(null)
 
+const MIN_SECRET = 8 // matches the server's minimum
 const secretRequired = computed(() => !editing.value || !!props.replace)
+const secretShort = computed(() => secret.value !== '' && secret.value.length < MIN_SECRET)
 const kindOk = computed(() => {
   if (kind.value === 'query') return paramName.value.trim() !== ''
   if (kind.value === 'basic') return username.value.trim() !== ''
   return true
 })
-const valid = computed(() => !(props.unavailable && (secretRequired.value || secret.value !== '')) && (props.replace ? true : name.value.trim() !== '' && kindOk.value) && (!secretRequired.value || secret.value !== ''))
+const valid = computed(() => !(props.unavailable && (secretRequired.value || secret.value !== '')) && (props.replace ? true : name.value.trim() !== '' && kindOk.value) && (!secretRequired.value || secret.value !== '') && !secretShort.value)
 
 onBeforeUnmount(clearSecret)
 function cancel() {
@@ -137,10 +139,14 @@ const title = computed(() => (props.replace ? `Replace secret for ${props.keyIte
       <div class="secret">
         <input
           id="kf-secret" :ref="(el) => { secretEl = el as HTMLInputElement | null; if (replace) first = el as HTMLElement }" v-model="secret" :type="showSecret ? 'text' : 'password'"
-          class="mono" autocomplete="new-password" autocapitalize="off" spellcheck="false" :required="secretRequired" :disabled="unavailable" data-test="secret"
+          class="mono" autocomplete="new-password" autocapitalize="off" spellcheck="false" :required="secretRequired" :disabled="unavailable"
+          :minlength="MIN_SECRET" aria-describedby="kf-secret-hint" :aria-invalid="secretShort" data-test="secret"
         />
         <button type="button" class="btn secondary" aria-label="Show secret" aria-controls="kf-secret" :aria-pressed="showSecret" data-test="toggle-secret" @click="showSecret = !showSecret">{{ showSecret ? 'Hide' : 'Show' }}</button>
       </div>
+      <span id="kf-secret-hint" class="hint" :class="secretShort ? 'error-text' : 'muted'" data-test="secret-hint">
+        At least {{ MIN_SECRET }} characters.<template v-if="kind === 'header'"> Plain ASCII only (no accents or line breaks).</template>
+      </span>
     </div>
 
     <p v-if="unavailable" class="muted small">Secrets can't be saved until KPI_SECRET_KEY is set on the server.</p>

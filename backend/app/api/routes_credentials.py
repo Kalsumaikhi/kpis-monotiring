@@ -24,6 +24,9 @@ NO_KEY = "KPI_SECRET_KEY is not set — see README → Keys"
 KIND_FIELDS = {"header": ("header_name", "prefix"), "query": ("param_name",), "basic": ("username",)}
 ALL_FIELDS = ("header_name", "prefix", "param_name", "username")
 TOKEN = re.compile(r"^[A-Za-z0-9!#$%&'*+.^_`|~-]{1,64}$")
+HEADER_SAFE = re.compile(r"^[\x20-\x7e]*$")  # printable ASCII: no CR/LF, no non-ASCII
+MIN_SECRET = 8
+NOT_ASCII = "header keys must be plain ASCII"
 
 
 class CredentialIn(BaseModel):
@@ -69,13 +72,17 @@ def _validate(name: str | None, kind: str, fields: dict, secret: str | None) -> 
     prefix, user = fields["prefix"], fields["username"]
     if prefix and (len(prefix) > 32 or re.search(r"[\r\n]", prefix)):
         raise HTTPException(422, "prefix must be at most 32 characters, no line breaks")
+    if kind == "header" and prefix and not HEADER_SAFE.match(prefix):
+        raise HTTPException(422, NOT_ASCII)
     if user and (":" in user or len(user) > 256):
         raise HTTPException(422, "username must be at most 256 characters and not contain ':'")
     if secret is not None:
-        if not secret or len(secret) > 4096:
-            raise HTTPException(422, "secret must be 1-4096 characters")
-        if kind == "header" and re.search(r"[\r\n]", secret):
-            raise HTTPException(422, "secret must not contain line breaks")
+        if len(secret) < MIN_SECRET:
+            raise HTTPException(422, f"secret must be at least {MIN_SECRET} characters")
+        if len(secret) > 4096:
+            raise HTTPException(422, "secret must be at most 4096 characters")
+        if kind == "header" and not HEADER_SAFE.match(secret):
+            raise HTTPException(422, NOT_ASCII)
     return fields
 
 
@@ -175,8 +182,8 @@ def create_credential(body: CredentialIn, session: Session = Depends(get_session
 def patch_credential(cid: int, body: CredentialPatch, session: Session = Depends(get_session)):
     row = _get(session, cid)
     data = body.model_dump(exclude_unset=True)
-    if "secret" in data and not data["secret"]:
-        raise HTTPException(422, "secret must not be empty")
+    if "secret" in data and data["secret"] is None:
+        raise HTTPException(422, f"secret must be at least {MIN_SECRET} characters")
     for k in ALL_FIELDS:
         if k in data:
             data[k] = _clean(data[k])
@@ -186,8 +193,19 @@ def patch_credential(cid: int, body: CredentialPatch, session: Session = Depends
     if name is None or kind is None:
         raise HTTPException(422, "name and kind cannot be null")
     fields = _validate(name, kind, fields, data.get("secret"))
+    if kind == "header" and row.kind != "header" and "secret" not in data:
+        # The stored secret was never checked as a header value; check it now.
+        try:
+            stored = creds.decrypt(row.secret_enc, creds.get_fernet())
+        except creds.KeyUnavailable:
+            raise HTTPException(
+                422, "this key's secret can't be read; enter a new secret to make it a header key"
+            ) from None
+        if not HEADER_SAFE.match(stored):
+            raise HTTPException(422, NOT_ASCII)
     if "secret" in data:
         row.secret_enc = _encrypt(data["secret"])
+        row.last_error = None  # a new secret has not been rejected yet; last_used_at stays
     row.name, row.kind = name.strip(), kind
     for k, v in fields.items():
         setattr(row, k, v)
