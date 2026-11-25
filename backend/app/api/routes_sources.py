@@ -31,7 +31,7 @@ def _source_or_404(session: Session, slug: str) -> Source:
 
 
 def _serialise(source: Source, last_run: Run | None, last_change_at, rows_tracked, changes_30d, streak,
-               incomplete=False, noisy_targets=0):
+               incomplete=False, noisy_targets=0, last_success_at=None):
     return {
         "slug": source.slug,
         "name": source.name,
@@ -54,6 +54,7 @@ def _serialise(source: Source, last_run: Run | None, last_change_at, rows_tracke
         "attribution": attribution_for(source.slug),
         "incomplete": incomplete,
         "noisy_targets": noisy_targets,
+        "last_success_at": iso(last_success_at),
     }
 
 
@@ -96,6 +97,15 @@ def list_sources(access: str | None = None, session: Session = Depends(get_sessi
             select(Run).ext(distinct_on(Run.source_id)).order_by(Run.source_id, Run.id.desc())
         )
     }
+    last_success = {
+        r.source_id: r.finished_at
+        for r in session.scalars(
+            select(Run)
+            .ext(distinct_on(Run.source_id))
+            .where(Run.status.in_(("ok", "no_change", "baseline")))
+            .order_by(Run.source_id, Run.id.desc())
+        )
+    }
     change_stats = {
         sid: (last, n30)
         for sid, last, n30 in session.execute(
@@ -130,7 +140,7 @@ def list_sources(access: str | None = None, session: Session = Depends(get_sessi
         _serialise(
             s, last_runs.get(s.id), change_stats.get(s.id, (None, 0))[0],
             rows.get(s.id, 0), change_stats.get(s.id, (None, 0))[1], streaks.get(s.id, 0),
-            s.id in incomplete, noisy.get(s.id, 0),
+            s.id in incomplete, noisy.get(s.id, 0), last_success.get(s.id),
         )
         for s in sources
     ]

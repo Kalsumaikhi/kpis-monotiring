@@ -77,7 +77,7 @@ def test_sources_list_shape(client, db_session, source):
     s = items[0]
     assert set(s) == {"slug", "name", "area", "access", "enabled", "cron", "last_run",
                       "last_change_at", "rows_tracked", "changes_30d", "failing_streak",
-                      "attribution", "incomplete", "noisy_targets"}
+                      "attribution", "incomplete", "noisy_targets", "last_success_at"}
     assert s["rows_tracked"] == 2
     assert s["changes_30d"] == 1
     assert s["failing_streak"] == 2
@@ -86,8 +86,22 @@ def test_sources_list_shape(client, db_session, source):
     assert s["last_run"]["status"] == "failed"
 
 
+def test_sources_last_success_ignores_running_latest(client, db_session, source):
+    t = datetime(2026, 11, 1, 12, tzinfo=timezone.utc)
+    db_session.add_all([
+        Run(source_id=source.id, status="ok", finished_at=t),
+        Run(source_id=source.id, status="failed", finished_at=t + timedelta(days=1)),
+        Run(source_id=source.id, status="running"),
+    ])
+    db_session.commit()
+    s = client.get("/api/sources").json()[0]
+    assert s["last_run"]["status"] == "running"
+    assert s["last_success_at"].startswith("2026-11-01T12:00:00")
+
+
 def test_sources_list_source_without_runs(client, source):
     s = client.get("/api/sources").json()[0]
+    assert s["last_success_at"] is None
     assert s["last_run"] is None and s["last_change_at"] is None
     assert (s["rows_tracked"], s["changes_30d"], s["failing_streak"]) == (0, 0, 0)
 

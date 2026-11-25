@@ -38,6 +38,10 @@ function relative(iso: string | null): string {
   for (const [u, s] of units) if (Math.abs(diff) >= s) return rtf.format(Math.round(diff / s), u)
   return 'just now'
 }
+const IN_FLIGHT: Record<string, string> = { running: 'In progress', queued: 'Queued', approve_queued: 'Applying…' }
+function checkLabel(r: NonNullable<Source['last_run']>): string {
+  return r.finished_at ? relative(r.finished_at) : (IN_FLIGHT[r.status] ?? 'not finished')
+}
 const absolute = (iso: string | null) => (iso ? new Date(iso).toLocaleString() : '')
 
 async function load() {
@@ -75,7 +79,10 @@ onMounted(load)
   <div class="page">
     <div class="page-head"><h1>Overview</h1></div>
 
-    <p v-if="error" class="error-text" role="alert">{{ error }}</p>
+    <div v-if="error" class="toolbar">
+      <p class="error-text" role="alert">{{ error }}</p>
+      <button type="button" class="btn secondary" @click="load">Retry</button>
+    </div>
     <p v-else-if="loading" class="muted">Loading sources…</p>
 
     <EmptyState v-else-if="!sources.length" title="No sources yet" hint="Add a custom source in Settings to start tracking.">
@@ -116,10 +123,14 @@ onMounted(load)
 
           <dl>
             <div>
-              <dt>Last run</dt>
+              <dt>Last success</dt>
+              <dd :title="absolute(s.last_success_at)">{{ relative(s.last_success_at) }}</dd>
+            </div>
+            <div>
+              <dt>Last check</dt>
               <dd>
                 <RouterLink v-if="s.last_run" :to="`/runs/${s.last_run.id}`" :title="absolute(s.last_run.finished_at)">
-                  {{ relative(s.last_run.finished_at) }}
+                  {{ checkLabel(s.last_run) }}
                 </RouterLink>
                 <span v-else>never</span>
               </dd>

@@ -37,6 +37,7 @@ export interface Source {
   attribution: string | null
   incomplete: boolean
   noisy_targets: number
+  last_success_at: string | null
 }
 // PATCH /api/sources/{slug}
 export interface SourcePatchResult { slug: string; enabled: boolean; cron: string | null }
