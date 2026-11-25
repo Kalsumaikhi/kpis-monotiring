@@ -18,7 +18,7 @@ watch(menuOpen, async (open, was) => {
   else if (was) menuBtn.value?.focus()
 })
 function onKey(e: KeyboardEvent) {
-  if (e.key === 'Escape' && menuOpen.value) menuOpen.value = false
+  if (e.key === 'Escape' && menuOpen.value && !e.defaultPrevented) menuOpen.value = false
 }
 onMounted(() => document.addEventListener('keydown', onKey))
 onBeforeUnmount(() => document.removeEventListener('keydown', onKey))
@@ -82,7 +82,7 @@ function signOut() {
     </aside>
     <div v-if="menuOpen" class="scrim" @click="menuOpen = false" />
 
-    <main class="content">
+    <main class="content" tabindex="-1">
       <slot />
     </main>
   </div>

@@ -46,3 +46,17 @@ describe('ConfirmDialog', () => {
     w.unmount()
   })
 })
+
+describe('ConfirmDialog mounted open', () => {
+  it('focuses Cancel and Escape emits cancel (and prevents default so the drawer stays put)', async () => {
+    const w = mount(ConfirmDialog, { props: { open: true, title: 'Sure?' }, attachTo: document.body })
+    await flushPromises()
+    const cancel = document.body.querySelector('[role="dialog"] button') as HTMLElement
+    expect(document.activeElement).toBe(cancel)
+    const ev = new KeyboardEvent('keydown', { key: 'Escape', cancelable: true, bubbles: true })
+    document.dispatchEvent(ev)
+    expect(ev.defaultPrevented).toBe(true)
+    expect(w.emitted('cancel')).toHaveLength(1)
+    w.unmount()
+  })
+})

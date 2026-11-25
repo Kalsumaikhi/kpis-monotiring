@@ -46,10 +46,12 @@ watch(
       cancelBtn.value?.focus() // the safe choice
     } else {
       document.removeEventListener('keydown', onKey)
-      opener?.focus()
+      const target = opener && opener.isConnected ? opener : document.querySelector<HTMLElement>('main')
+      target?.focus()
       opener = null
     }
   },
+  { immediate: true },
 )
 onBeforeUnmount(() => document.removeEventListener('keydown', onKey))
 </script>

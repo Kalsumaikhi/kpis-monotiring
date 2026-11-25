@@ -15,7 +15,7 @@ function target(): string {
   const n = route.query.next
   const s = Array.isArray(n) ? n[0] : n
   // only same-site paths, never //host or a scheme
-  return typeof s === 'string' && s.startsWith('/') && !s.startsWith('//') && !s.startsWith('/login') ? s : '/'
+  return typeof s === 'string' && s.startsWith('/') && !s.startsWith('//') && !s.startsWith('/\\') && !s.startsWith('/login') ? s : '/'
 }
 
 async function submit() {
