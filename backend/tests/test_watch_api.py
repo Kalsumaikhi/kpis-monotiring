@@ -377,3 +377,47 @@ def test_held_run_keeps_needs_baseline_and_approve_clears(client, db_session, se
     assert t.needs_baseline is False
     assert {c.indicator for c in db_session.scalars(select(Change))} == {"Old"}
     assert gone  # silence unused
+
+
+@pytest.mark.parametrize("mutation", ["rename", "url", "disable", "delete"])
+def test_kpi_mutation_supersedes_held_runs(client, db_session, session_factory, mutation):
+    from app.models import PendingChange
+
+    a = create(client, kpi="A", url="https://h.example/a").json()["id"]
+    create(client, kpi="B", url="https://h.example/b")
+    with respx.mock:
+        serve({"a": "1", "b": "2"})
+        assert pipeline.run_source(session_factory, "custom-acme").status == "baseline"
+        serve({"a": "1x", "b": "2x"})
+        held = pipeline.run_source(session_factory, "custom-acme", force_hold=True)
+    assert held.status == "suspect_pending"
+    queued = Run(source_id=held.source_id, status="approve_queued")
+    db_session.add(queued)
+    db_session.flush()
+    assert db_session.scalars(select(PendingChange).where(PendingChange.run_id == held.id)).all()
+    resp = {
+        "rename": lambda: client.patch(f"/api/watch-targets/{a}", json={"kpi_name": "A2"}),
+        "url": lambda: client.patch(f"/api/watch-targets/{a}", json={"url": "https://h.example/a2"}),
+        "disable": lambda: client.patch(f"/api/watch-targets/{a}", json={"enabled": False}),
+        "delete": lambda: client.delete(f"/api/watch-targets/{a}"),
+    }[mutation]()
+    assert resp.status_code in (200, 204)
+    held = db_session.get(Run, held.id)
+    for r, msg in ((held, "superseded by a change to the source's KPIs"),
+                   (queued, "superseded by a change to the source's KPIs before the approval was applied")):
+        db_session.refresh(r)
+        assert (r.status, r.error) == ("superseded", msg)
+    assert db_session.scalars(select(PendingChange).where(PendingChange.run_id == held.id)).all() == []
+
+
+def test_harmless_edit_keeps_held_runs(client, db_session, session_factory):
+    a = create(client, kpi="A", url="https://h.example/a").json()["id"]
+    with respx.mock:
+        serve({"a": "1"})
+        pipeline.run_source(session_factory, "custom-acme")
+        serve({"a": "1x"})
+        held = pipeline.run_source(session_factory, "custom-acme", force_hold=True)
+    assert client.patch(f"/api/watch-targets/{a}", json={"selector": "main"}).status_code == 200
+    held = db_session.get(Run, held.id)
+    db_session.refresh(held)
+    assert held.status == "suspect_pending"

@@ -243,7 +243,7 @@ HELD_STATUSES = ("suspect_pending", "approve_queued")
 
 
 def _supersede_held(session: Session, source_id: int, before_id: int | None = None,
-                    except_id: int | None = None) -> None:
+                    except_id: int | None = None, reason: str = "a newer run") -> None:
     """Mark older held runs superseded and drop their pending changes."""
     q = update(Run).where(Run.source_id == source_id, Run.status.in_(HELD_STATUSES))
     if before_id is not None:
@@ -253,8 +253,8 @@ def _supersede_held(session: Session, source_id: int, before_id: int | None = No
     # CASE reads the pre-update status, so the message says whether an approval was lost.
     msg = case(
         (Run.status == "approve_queued",
-         "superseded by a newer run before the approval was applied"),
-        else_="superseded by a newer run",
+         f"superseded by {reason} before the approval was applied"),
+        else_=f"superseded by {reason}",
     )
     ids = session.execute(
         q.values(status="superseded", error=msg).returning(Run.id)

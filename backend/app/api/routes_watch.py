@@ -20,7 +20,7 @@ from app import watch_import
 from app.api.deps import get_session
 from app.api.util import iso
 from app.connectors.watch import noisy_target_ids
-from app.core.pipeline import SourceBusyError, _acquire_source_lock
+from app.core.pipeline import SourceBusyError, _acquire_source_lock, _supersede_held
 from app.core.canonical import dims_to_json, key_hash_for
 from app.connectors.watch.connector import _process
 from app.connectors.watch.extract import flatten_json
@@ -216,12 +216,17 @@ def patch_target(target_id: int, body: TargetPatch, session: Session = Depends(g
         return _target_json(t)
     with _source_lock(session, t.source_id):
         session.refresh(t)  # state may have changed while waiting
-        _apply_patch(session, t, body, new_name, new_url)
+        _apply_patch(session, t, body, new_name, new_url, supersede=True)
     return _target_json(t)
 
 
+# Held runs were diffed against the targets as they were; applying one after a KPI changed
+# would write data under a stale name or link, so changing a KPI drops them.
+HELD_REASON = "a change to the source's KPIs"
+
+
 def _apply_patch(session: Session, t: WatchTarget, body: TargetPatch, new_name: str,
-                 new_url: str) -> None:
+                 new_url: str, supersede: bool = False) -> None:
     if (new_name, new_url) != (t.kpi_name, t.url):
         msg = _conflict(session, t.source_id, new_name, new_url, exclude_id=t.id)
         if msg:
@@ -258,6 +263,8 @@ def _apply_patch(session: Session, t: WatchTarget, body: TargetPatch, new_name: 
                 setattr(t, f, getattr(body, f))
         if "selector" in body.model_fields_set:
             t.selector = body.selector or None
+        if supersede:
+            _supersede_held(session, t.source_id, reason=HELD_REASON)
         session.commit()
     except IntegrityError:
         session.rollback()
@@ -273,6 +280,7 @@ def delete_target(target_id: int, session: Session = Depends(get_session)):
         session.execute(delete(Indicator).where(
             Indicator.source_id == t.source_id, Indicator.code == t.kpi_name))
         session.delete(t)
+        _supersede_held(session, t.source_id, reason=HELD_REASON)
         session.commit()
 
 
