@@ -140,7 +140,8 @@ export interface UploadResult { run_id: number }
 
 // Custom (watch) sources
 export type WatchKind = 'auto' | 'page' | 'api'
-export type WatchStatus = 'never' | 'ok' | 'baseline' | 'failed' | 'blocked' | 'no_change' | string
+// watch_targets.last_status: 'never' until checked, then the last fetch outcome
+export type WatchStatus = 'ok' | 'blocked' | 'error' | 'never'
 export interface WatchTarget {
   id: number
   kpi_name: string

@@ -16,6 +16,7 @@ const MAP: Record<string, { label: string; tone: Tone; icon: Icon }> = {
   running: { label: 'Running', tone: 'muted', icon: 'spinner' },
   queued: { label: 'Queued', tone: 'muted', icon: 'clock' },
   blocked: { label: 'Blocked', tone: 'warn', icon: 'ban' },
+  error: { label: 'Error', tone: 'fail', icon: 'cross' },
   never: { label: 'Not checked yet', tone: 'muted', icon: 'clock' },
 }
 
