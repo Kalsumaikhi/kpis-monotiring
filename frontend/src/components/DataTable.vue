@@ -3,9 +3,11 @@ export interface Column {
   key: string
   label: string
   align?: 'left' | 'right' | 'center'
+  /** API sort key; makes the header a sort button. */
+  sortKey?: string
 }
-defineProps<{ columns: Column[]; rows: Row[]; loading?: boolean; empty?: string; rowKey?: string }>()
-const emit = defineEmits<{ rowClick: [row: Row] }>()
+defineProps<{ columns: Column[]; rows: Row[]; loading?: boolean; empty?: string; rowKey?: string; sort?: string; order?: 'asc' | 'desc' }>()
+const emit = defineEmits<{ rowClick: [row: Row]; sort: [key: string] }>()
 </script>
 
 <template>
@@ -13,7 +15,13 @@ const emit = defineEmits<{ rowClick: [row: Row] }>()
     <table>
       <thead>
         <tr>
-          <th v-for="c in columns" :key="c.key" scope="col" :style="{ textAlign: c.align ?? 'left' }">{{ c.label }}</th>
+          <th v-for="c in columns" :key="c.key" scope="col" :style="{ textAlign: c.align ?? 'left' }"
+              :aria-sort="c.sortKey ? (sort === c.sortKey ? (order === 'asc' ? 'ascending' : 'descending') : 'none') : undefined">
+            <button v-if="c.sortKey" type="button" class="sort" @click="emit('sort', c.sortKey)">
+              {{ c.label }}<span aria-hidden="true" class="arrow">{{ sort === c.sortKey ? (order === 'asc' ? '▲' : '▼') : '' }}</span>
+            </button>
+            <template v-else>{{ c.label }}</template>
+          </th>
         </tr>
       </thead>
       <tbody>
@@ -44,4 +52,7 @@ tbody tr:last-child td { border-bottom: 0; }
 tbody tr:hover td { background: var(--surface-2); }
 .state { text-align: center; padding: 28px 12px; }
 .dim { opacity: 0.6; }
+.sort { all: unset; cursor: pointer; display: inline-flex; gap: 4px; align-items: center; font: inherit; color: inherit; }
+.sort:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.arrow { font-size: 0.65rem; min-width: 0.65rem; }
 </style>

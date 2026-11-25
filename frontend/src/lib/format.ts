@@ -25,3 +25,11 @@ export function fmtValue(v: string | null | undefined): string {
   if (!m) return v
   return m[1] + m[2].replace(/\B(?=(\d{3})+(?!\d))/g, ',') + (m[3] ?? '')
 }
+
+/** "typical interval" between changes: days under 60, otherwise whole months (N/30 rounded). */
+export function fmtInterval(days: number | null | undefined): string {
+  if (days === null || days === undefined || !Number.isFinite(days)) return '—'
+  const n = Math.round(days)
+  if (n >= 60) return `≈ every ${Math.round(n / 30)} months`
+  return `≈ every ${n} ${n === 1 ? 'day' : 'days'}`
+}
