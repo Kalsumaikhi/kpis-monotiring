@@ -166,6 +166,19 @@ def test_runs_pagination_and_filter(client, db_session, source):
     assert client.get("/api/runs?page_size=201").status_code == 422
 
 
+def test_runs_has_changes_filter(client, db_session, source):
+    db_session.add_all([
+        Run(source_id=source.id, status="ok", added=1),
+        Run(source_id=source.id, status="ok", removed=2),
+        Run(source_id=source.id, status="no_change"),
+    ])
+    db_session.commit()
+    assert client.get("/api/runs").json()["total"] == 3
+    r = client.get("/api/runs?has_changes=true").json()
+    assert r["total"] == 2 and all(i["added"] + i["removed"] > 0 for i in r["items"])
+    assert client.get("/api/runs?has_changes=false").json()["total"] == 3
+
+
 def _run_with_changes(db_session, source):
     run = Run(source_id=source.id, status="ok")
     db_session.add(run)

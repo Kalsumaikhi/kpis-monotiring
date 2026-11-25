@@ -5,6 +5,7 @@ export interface Column {
   align?: 'left' | 'right' | 'center'
 }
 defineProps<{ columns: Column[]; rows: Row[]; loading?: boolean; empty?: string; rowKey?: string }>()
+const emit = defineEmits<{ rowClick: [row: Row] }>()
 </script>
 
 <template>
@@ -23,7 +24,7 @@ defineProps<{ columns: Column[]; rows: Row[]; loading?: boolean; empty?: string;
           <td :colspan="columns.length" class="state muted">{{ empty ?? 'Nothing to show yet.' }}</td>
         </tr>
         <template v-else>
-          <tr v-for="(row, i) in rows" :key="rowKey ? row[rowKey] : i" :class="{ dim: loading }">
+          <tr v-for="(row, i) in rows" :key="rowKey ? row[rowKey] : i" :class="{ dim: loading }" @click="emit('rowClick', row)">
             <td v-for="c in columns" :key="c.key" :style="{ textAlign: c.align ?? 'left' }">
               <slot :name="`cell-${c.key}`" :row="row" :value="row[c.key]">{{ row[c.key] }}</slot>
             </td>

@@ -55,6 +55,7 @@ def list_runs(
     source: str | None = None,
     status: str | None = None,
     since: datetime | None = None,
+    has_changes: bool = False,
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
     session: Session = Depends(get_session),
@@ -66,6 +67,8 @@ def list_runs(
         q = q.where(Run.status == status)
     if since:
         q = q.where(Run.started_at >= since)
+    if has_changes:
+        q = q.where(Run.added + Run.altered + Run.removed > 0)
     total = session.scalar(select(func.count()).select_from(q.order_by(None).subquery()))
     rows = session.execute(
         q.order_by(Run.id.desc()).limit(page_size).offset((page - 1) * page_size)
