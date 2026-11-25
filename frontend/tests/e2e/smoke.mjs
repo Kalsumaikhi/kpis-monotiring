@@ -44,11 +44,26 @@ async function cleanup() {
     }
   } catch (e) { console.error('cleanup failed:', e.message) }
 }
-for (const sig of ['SIGINT', 'SIGTERM']) {
-  process.on(sig, async () => {
-    await cleanup()
+const withTimeout = (promise, ms) => Promise.race([promise, new Promise((r) => setTimeout(r, ms).unref())])
+let browser
+let closed = false
+// Close the browser and the page server and remove the temp CSV. Safe to call twice.
+async function closeAll() {
+  if (closed) return
+  closed = true
   fs.rmSync(csvPath, { force: true })
-    process.exit(130)
+  server.closeAllConnections?.()
+  await withTimeout(Promise.allSettled([
+    browser?.close(),
+    new Promise((r) => server.close(() => r())),
+  ]), 5000)
+}
+for (const [sig, code] of [['SIGINT', 130], ['SIGTERM', 143]]) {
+  process.on(sig, async () => {
+    setTimeout(() => process.exit(code), 20000).unref() // hard cap if cleanup hangs
+    await withTimeout(cleanup(), 10000)
+    await closeAll()
+    process.exit(code)
   })
 }
 const step = (n, msg) => console.log(`[${n}] ${msg}`)
@@ -66,8 +81,11 @@ async function waitFinished(slug, before, timeoutMs = 90000) {
 }
 
 fs.mkdirSync(SHOTS, { recursive: true })
-const browser = await chromium.launch({ executablePath: process.env.KPI_CHROMIUM_PATH || undefined, // --no-sandbox: the container runs as root, where Chromium's sandbox cannot start. Fine for a local test browser.
-  args: ['--no-sandbox'] })
+browser = await chromium.launch({
+  executablePath: process.env.KPI_CHROMIUM_PATH || undefined,
+  // --no-sandbox: the container runs as root, where Chromium's sandbox cannot start. Fine for a local test browser.
+  args: ['--no-sandbox'],
+})
 const ctx = await browser.newContext({ viewport: { width: 1280, height: 800 }, deviceScaleFactor: 2 })
 const page = await ctx.newPage()
 page.setDefaultTimeout(15000)
@@ -214,6 +232,5 @@ try {
 } finally {
   await cleanup()
   if (MM_LOG && fs.existsSync(MM_LOG)) console.log('Mattermost messages received:\n' + fs.readFileSync(MM_LOG, 'utf8'))
-  await browser.close()
-  server.close()
+  await closeAll()
 }

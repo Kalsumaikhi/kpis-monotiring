@@ -123,6 +123,7 @@ Besides the built-in datasets you can watch any web page or JSON API link (Setti
 
 - **Add KPI**: source name, KPI name, link. "Test link" shows what would be read. Under Advanced you can set a CSS selector (focus area), force page/API mode, or ask for a headless browser for JavaScript-built pages.
 - **Import from Excel/CSV**: a `.xlsx` or `.csv` with the columns `Source name`, `KPI name`, `Link` (the dialog offers a template). The preview marks each row as new, existing, duplicate (skipped) or invalid before anything is created.
+- **Renaming a KPI** keeps its current value but starts its change history fresh: past changes stay in the change feed and run details under the old name, while the explorer and KPI frequency count only changes recorded after the rename.
 - **First check**: a new KPI's first check only records a baseline; no change alert is sent. Alerts (and Mattermost messages) start with the second check that finds a change; built-in sources still post a one-line "baseline loaded" note. The Mattermost message lists the changed KPI pages with a short `+`/`-` excerpt in a code block (page text is shown as code, so it cannot format the message or @mention anyone).
 - **Politeness and safety**: `robots.txt` is respected, requests are limited to 1 per second per host, and links to internal addresses (loopback, private ranges) are blocked unless the host is listed in `WATCH_ALLOWED_HOSTS`. Redirects are re-checked on every hop. In browser mode, Chromium sends all its traffic (page, images, scripts, redirects, HTTPS and WebSockets) through a small built-in proxy that applies the same block, and WebRTC UDP is disabled.
 
@@ -149,15 +150,16 @@ export RAW_DIR=/tmp/kpi-raw && mkdir -p "$RAW_DIR"
 # optional: MATTERMOST_WEBHOOK_URL=http://127.0.0.1:8766/hook (a stub server of your own)
 
 (cd backend && uv run alembic upgrade head)
-(cd backend && uv run uvicorn app.api.main:app --port 8000) &
-(cd backend && uv run python -m app.worker) &
-(cd frontend && npm run build && npx vite preview --port 8080) &
+(cd backend && exec uv run uvicorn app.api.main:app --port 8000) & API_PID=$!
+(cd backend && exec uv run python -m app.worker) & WORKER_PID=$!
+(cd frontend && npm run build && exec ./node_modules/.bin/vite preview --port 8080) & WEB_PID=$!
 
-cd frontend
-npm run e2e                                        # the smoke test
-node tests/e2e/screenshots.mjs                     # optional: regenerate docs/screenshots/
+(cd frontend && npm run e2e)                       # the smoke test
+(cd frontend && node tests/e2e/screenshots.mjs)    # optional: regenerate docs/screenshots/
 
-kill %1 %2 %3                                      # stop the three background servers
+kill $API_PID $WORKER_PID $WEB_PID                 # stop the three background servers
 ```
+
+Set `KPI_CHROMIUM_PATH` to a Chromium executable if Playwright's own browser is not installed; the smoke test and the worker's "needs a browser" KPIs both use it.
 
 The test serves its own page on 127.0.0.1:8765 (`E2E_PAGE_PORT`), removes the KPIs it creates (also on failure or Ctrl-C), and waits up to 90 s per run for the worker.
