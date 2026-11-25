@@ -196,7 +196,9 @@ def list_indicators(
     }
 
 
-@router.get("/sources/{slug}/indicators/{code}/countries")
+# {code:path}: custom KPI names may contain "/" (the client sends it as %2F, which the
+# server decodes before routing).
+@router.get("/sources/{slug}/indicators/{code:path}/countries")
 def list_countries(
     slug: str,
     code: str,
@@ -247,7 +249,7 @@ def _value(num, txt) -> str | None:
 def series(
     slug: str,
     indicator: str,
-    country: str,
+    country: str = "",  # watch (custom) sources have no country; the client omits empty values
     session: Session = Depends(get_session),
 ):
     sid = _source_id_or_404(session, slug)

@@ -10,6 +10,8 @@ from app.api.main import create_app
 from app.config import get_settings
 from app.core import rollup
 from app.models import Change, ChangeRollup, DataPoint, Indicator, Run, Source
+from app.core.canonical import RawRow, to_canonical
+from app.core.diff import apply_diff, stage_rows
 from tests.conftest import row, seed
 
 
@@ -137,7 +139,23 @@ def test_series_points_and_history(client, db_session, source, run):
     assert h["run_id"] == run.id and h["change_type"] == "altered"
     assert h["old"] == "1" and h["new"] == "2.5" and h["created_at"]
     assert body["attribution"] is None
-    assert client.get("/api/sources/s/series", params={"indicator": "i"}).status_code == 422
+    # no country -> country "" (watch sources), not 422
+    r = client.get("/api/sources/s/series", params={"indicator": "i"})
+    assert r.status_code == 200 and r.json()["points"] == []
+
+
+def test_explorer_custom_kpi_without_country_and_with_slash(client, db_session, source, run):
+    """Watch KPIs: country is "" and the code (the KPI name) may contain '/'."""
+    stage_rows(db_session, [to_canonical(RawRow("watch", "Price / unit", "", "current", "abc"))])
+    apply_diff(db_session, source.id, 0, complete=True, record_changes=False)
+    _ind(db_session, source, "Price / unit", "Price / unit")
+    body = client.get("/api/sources/s/indicators/Price%20%2F%20unit/countries").json()
+    assert body["total"] == 1 and body["items"][0]["country"] == ""
+    r = client.get("/api/sources/s/series", params={"indicator": "Price / unit"})
+    assert r.status_code == 200
+    assert [(p["period"], p["value"]) for p in r.json()["points"]] == [("current", "abc")]
+    r = client.get("/api/sources/s/series", params={"indicator": "Price / unit", "country": ""})
+    assert len(r.json()["points"]) == 1
 
 
 def test_series_history_capped(client, db_session, source, run):
