@@ -66,6 +66,28 @@ describe('TargetForm', () => {
     expect(w.text()).toContain("Internal addresses aren't allowed")
   })
 
+  it('test link says the key was rejected, not "Looks good"', async () => {
+    apiSend.mockResolvedValue({ status: 'key_rejected', kind: 'page', error: 'key rejected (HTTP 403)' })
+    const w = mount(TargetForm, { props: { sourceNames: [] } })
+    await w.get('#tf-url').setValue('https://example.com/p')
+    await w.get('[data-test=test-link]').trigger('click')
+    await flushPromises()
+    const box = w.get('[data-test=test-result]').text()
+    expect(box).toContain('The site rejected this key (HTTP 403). Check the key or replace its secret.')
+    expect(box).not.toContain('Looks good')
+  })
+
+  it('test link treats any status other than ok as a failure', async () => {
+    apiSend.mockResolvedValue({ status: 'something_new', kind: 'page', error: 'odd' })
+    const w = mount(TargetForm, { props: { sourceNames: [] } })
+    await w.get('#tf-url').setValue('https://example.com/p')
+    await w.get('[data-test=test-link]').trigger('click')
+    await flushPromises()
+    const box = w.get('[data-test=test-result]').text()
+    expect(box).toContain('Could not read this link.')
+    expect(box).not.toContain('Looks good')
+  })
+
   it('shows 409 inline on save', async () => {
     apiSend.mockRejectedValue(new ApiError(409, 'a KPI with this link already exists'))
     const w = mount(TargetForm, { props: { sourceNames: [] } })

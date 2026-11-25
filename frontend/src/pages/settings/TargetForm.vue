@@ -22,6 +22,8 @@ const saveError = ref('')
 const testing = ref(false)
 const testResult = ref<TestLinkResult | null>(null)
 const testError = ref('')
+// "key rejected (HTTP 403)" -> "403"; the generic wording when the server didn't say.
+const rejectedCode = computed(() => /HTTP (\d{3})/.exec(testResult.value?.error ?? '')?.[1] ?? '401/403')
 const first = ref<HTMLInputElement | null>(null)
 
 const urlOk = computed(() => /^https?:\/\/[^\s/]+\S*$/i.test(url.value.trim()))
@@ -141,7 +143,10 @@ const jsonRows = computed(() => (testResult.value?.json_preview ?? []).map((r) =
         <strong>Blocked.</strong> {{ blockedWords }}
         <div v-if="testResult.error" class="muted small">{{ testResult.error }}</div>
       </template>
-      <template v-else-if="testResult.status === 'error'">
+      <template v-else-if="testResult.status === 'key_rejected'">
+        <strong class="error-text">The site rejected this key (HTTP {{ rejectedCode }}).</strong> Check the key or replace its secret.
+      </template>
+      <template v-else-if="testResult.status !== 'ok'">
         <strong class="error-text">Could not read this link.</strong>
         <div class="small">{{ testResult.error }}</div>
       </template>
