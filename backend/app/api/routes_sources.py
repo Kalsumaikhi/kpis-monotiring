@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from app.api.util import iso
 from app.api.deps import get_session
+from app.api.routes_kpis import attribution_for
 from app.models import Change, DataPoint, Run, Source
 
 router = APIRouter()
@@ -29,7 +30,8 @@ def _source_or_404(session: Session, slug: str) -> Source:
     return source
 
 
-def _serialise(source: Source, last_run: Run | None, last_change_at, rows_tracked, changes_30d, streak):
+def _serialise(source: Source, last_run: Run | None, last_change_at, rows_tracked, changes_30d, streak,
+               incomplete=False, noisy_targets=0):
     return {
         "slug": source.slug,
         "name": source.name,
@@ -49,7 +51,33 @@ def _serialise(source: Source, last_run: Run | None, last_change_at, rows_tracke
         "rows_tracked": rows_tracked,
         "changes_30d": changes_30d,
         "failing_streak": streak,
+        "attribution": attribution_for(source.slug),
+        "incomplete": incomplete,
+        "noisy_targets": noisy_targets,
     }
+
+
+def _noisy_counts(session: Session) -> dict[int, int]:
+    """Watch targets flagged as noisy, by source id. Hook for Task 4; nothing is flagged yet."""
+    return {}
+
+
+def _incomplete_ids(session: Session) -> set[int]:
+    """Sources whose latest finished run (not failed) has an 'incomplete:' error."""
+    return set(
+        session.execute(
+            text(
+                """
+                SELECT source_id FROM (
+                    SELECT DISTINCT ON (source_id) source_id, status, error FROM runs
+                    WHERE status NOT IN ('queued', 'running', 'approve_queued')
+                    ORDER BY source_id, id DESC
+                ) latest
+                WHERE status <> 'failed' AND error LIKE 'incomplete:%'
+                """
+            )
+        ).scalars()
+    )
 
 
 @router.get("/sources")
@@ -91,10 +119,13 @@ def list_sources(session: Session = Depends(get_session)):
             )
         ).all()
     )
+    incomplete = _incomplete_ids(session)
+    noisy = _noisy_counts(session)
     return [
         _serialise(
             s, last_runs.get(s.id), change_stats.get(s.id, (None, 0))[0],
             rows.get(s.id, 0), change_stats.get(s.id, (None, 0))[1], streaks.get(s.id, 0),
+            s.id in incomplete, noisy.get(s.id, 0),
         )
         for s in sources
     ]

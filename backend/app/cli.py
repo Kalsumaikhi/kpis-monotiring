@@ -33,6 +33,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="app.cli")
     sub = parser.add_subparsers(dest="cmd", required=True)
     sub.add_parser("sync-sources", help="upsert one sources row per connector")
+    sub.add_parser("backfill-rollup", help="rebuild change_rollup from all changes")
     run_p = sub.add_parser("run", help="run one source now")
     run_p.add_argument("slug")
     run_p.add_argument("--from-raw", type=Path, help="use this file instead of downloading")
@@ -44,6 +45,14 @@ def main(argv: list[str] | None = None) -> int:
         with SessionLocal() as session:
             sync_sources(session)
         print(f"synced {len(CONNECTORS)} sources")
+        return 0
+
+    if args.cmd == "backfill-rollup":
+        from app.core.rollup import backfill
+
+        with SessionLocal() as session:
+            n = backfill(session)
+        print(f"rebuilt change_rollup: {n} rows")
         return 0
 
     if args.slug not in CONNECTORS:

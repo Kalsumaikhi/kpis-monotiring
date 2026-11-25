@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.connectors.base import IndicatorMeta
 from app.connectors.registry import resolve_connector
-from app.core import raw_store
+from app.core import raw_store, rollup
 from app.core.canonical import to_canonical
 from app.core.diff import DiffResult, apply_diff, compute_diff, record_pending, stage_rows
 from app.models import Change, DataPoint, PendingChange, Run, Source
@@ -109,6 +109,7 @@ def _canonical_rows(rows: Iterable):
 
 
 def _upsert_indicators(session: Session, source_id: int, metas: list[IndicatorMeta]) -> None:
+    # indicators.first_seen_at defaults to now() on insert and is never updated.
     for m in metas:
         session.execute(
             text(
@@ -220,6 +221,8 @@ def _finish(session: Session, run: Run, status: str, diff: DiffResult, metas, vi
     if status != "suspect_pending":
         # Metadata of an unapproved (held) file must not reach the indicators table.
         _upsert_indicators(session, run.source_id, metas)
+        if status == "ok":
+            rollup.refresh_rollup(session, run.id)  # same transaction as the applied changes
         # Newer good data makes any earlier held run stale: approving it would re-apply old removals.
         _supersede_held(session, run.source_id, before_id=run.id)
     session.commit()

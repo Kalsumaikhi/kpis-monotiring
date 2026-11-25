@@ -41,6 +41,7 @@ def _clean(v) -> str | None:
 
 class WorldBankWDI:
     slug = "worldbank-wdi"
+    attribution = "Source: World Bank, World Development Indicators (CC BY 4.0)"
     name = "World Bank WDI"
     area = "economic"
     access = "api"

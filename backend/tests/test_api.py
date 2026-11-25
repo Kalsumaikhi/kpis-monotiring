@@ -76,7 +76,8 @@ def test_sources_list_shape(client, db_session, source):
     assert len(items) == 1
     s = items[0]
     assert set(s) == {"slug", "name", "area", "access", "enabled", "cron", "last_run",
-                      "last_change_at", "rows_tracked", "changes_30d", "failing_streak"}
+                      "last_change_at", "rows_tracked", "changes_30d", "failing_streak",
+                      "attribution", "incomplete", "noisy_targets"}
     assert s["rows_tracked"] == 2
     assert s["changes_30d"] == 1
     assert s["failing_streak"] == 2

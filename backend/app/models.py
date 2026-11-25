@@ -64,6 +64,7 @@ class Indicator(Base):
     name: Mapped[str | None] = mapped_column(Text)
     unit: Mapped[str | None] = mapped_column(Text)
     description: Mapped[str | None] = mapped_column(Text)
+    first_seen_at: Mapped[datetime] = _now()
 
 
 class DataPoint(Base):
