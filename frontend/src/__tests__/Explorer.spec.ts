@@ -8,7 +8,7 @@ vi.mock('../api/client', async () => {
   const actual = await vi.importActual<typeof import('../api/client')>('../api/client')
   return { ...actual, apiGet: (...a: unknown[]) => apiGet(...a) }
 })
-vi.mock('../components/SeriesChart.vue', () => ({ default: { render: () => h('div', { 'data-test': 'chart-stub' }) } }))
+vi.mock('../components/SeriesChart.vue', () => ({ default: { props: ['series', 'labels', 'label'], render(this: { series: unknown }) { return h('div', { 'data-series': JSON.stringify(this.series) }) } } }))
 import ExplorerPage from '../pages/ExplorerPage.vue'
 import { isNumericSeries, sortPeriods } from '../lib/series'
 
@@ -72,6 +72,23 @@ describe('Explorer', () => {
     const points = Array.from({ length: 8 }, (_, i) => pt('2024', String(i), { k: i }))
     const { w } = await mountAt('/explorer/s/I/DE', (url) => (url === '/api/sources' ? sources : { points, history: [], attribution: null }))
     expect(w.get('[data-test=series-note]').text()).toContain('Showing 6 of 8 series')
+  })
+
+  it('picking groups 0 and 6 gives distinct colour slots and the table follows the selection', async () => {
+    const points = [
+      ...Array.from({ length: 8 }, (_, i) => pt('2024', String(i), { k: i })),
+      ...Array.from({ length: 8 }, (_, i) => pt('2023', String(i + 10), { k: i })),
+    ]
+    const { w } = await mountAt('/explorer/s/I/DE', (url) => (url === '/api/sources' ? sources : { points, history: [], attribution: null }))
+    const sel = w.get('#ex-series').element as HTMLSelectElement
+    ;[...sel.options].forEach((o, i) => { o.selected = i === 0 || i === 6 })
+    await w.get('#ex-series').trigger('change')
+    await flushPromises()
+    const series = JSON.parse(w.get('[data-series]').attributes('data-series')!)
+    expect(series.map((s: { colorIndex: number }) => s.colorIndex)).toEqual([0, 1])
+    expect(series.map((s: { label: string }) => s.label)).toEqual(['k=0', 'k=6'])
+    const rows = w.findAll('section[aria-labelledby=ex-points-h] tbody tr').map((r) => r.findAll('td').map((c) => c.text()))
+    expect(rows).toEqual([['2023', 'k=0', '10'], ['2023', 'k=6', '16'], ['2024', 'k=0', '0'], ['2024', 'k=6', '6']])
   })
 
   it('a lone empty country skips the country step', async () => {

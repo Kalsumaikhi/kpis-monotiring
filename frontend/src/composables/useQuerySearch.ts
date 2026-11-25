@@ -20,6 +20,11 @@ export function useQuerySearch(delay = 300) {
       router.replace({ query: q })
     }, delay)
   })
+  // Moving to another step/page cancels a pending search so a stale q is not injected there.
+  watch(() => route.path, () => {
+    clearTimeout(timer)
+    text.value = str(route.query.q)
+  })
   watch(() => route.query.q, (v) => { text.value = str(v) })
   onBeforeUnmount(() => clearTimeout(timer))
   return text

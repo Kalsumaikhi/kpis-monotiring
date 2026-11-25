@@ -80,4 +80,18 @@ describe('KPI frequency', () => {
       vi.useRealTimers()
     }
   })
+
+  it('a pending search is cancelled when the route changes', async () => {
+    vi.useFakeTimers()
+    try {
+      const { w, router } = await mountPage()
+      await w.get('#k-q').setValue('stale')
+      await router.push('/explorer/worldbank')
+      vi.advanceTimersByTime(500)
+      await flushPromises()
+      expect(router.currentRoute.value.query.q).toBeUndefined()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
 })

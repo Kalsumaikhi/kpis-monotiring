@@ -13,7 +13,7 @@ const props = defineProps<{ labels: string[]; series: ChartSeries[]; label: stri
 
 const canvas = ref<HTMLCanvasElement | null>(null)
 let chart: Chart | null = null
-const DASHES: number[][] = [[], [6, 4], [2, 3], [8, 3, 2, 3], [], [6, 4]]
+const DASHES: number[][] = [[], [6, 4], [2, 3], [8, 3, 2, 3], [12, 4], [1, 5]]
 
 const fmtTick = (v: number | string) => {
   const n = Number(v)

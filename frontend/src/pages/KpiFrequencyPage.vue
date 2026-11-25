@@ -118,7 +118,7 @@ const open = (r: KpiRow) => router.push({ name: 'explorer', params: { slug: r.so
       empty="No indicators match these filters." @sort="onSort" @row-click="open">
       <template #cell-name="{ row }">
         <RouterLink :to="{ name: 'explorer', params: { slug: row.source, indicator: row.indicator } }" @click.stop>{{ row.name }}</RouterLink>
-        <span v-if="row.name !== row.indicator" class="muted code"> {{ row.indicator }}</span>
+        <span v-if="row.name !== row.indicator" class="muted code">{{ row.indicator }}</span>
       </template>
       <template #cell-changes_30d="{ row }">{{ fmtNum(row.changes_30d) }}</template>
       <template #cell-changes_12m="{ row }">{{ fmtNum(row.changes_12m) }}</template>
@@ -134,7 +134,7 @@ const open = (r: KpiRow) => router.push({ name: 'explorer', params: { slug: r.so
 <style scoped>
 .filters { display: flex; flex-wrap: wrap; gap: 12px 16px; align-items: flex-end; }
 .filters .grow { flex: 1 1 220px; min-width: 0; }
-.code { font-family: var(--font-mono); font-size: 0.85em; margin-left: 6px; }
+.code { display: block; font-family: var(--font-mono); font-size: 0.8em; }
 </style>
 
 <style>

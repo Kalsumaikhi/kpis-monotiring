@@ -7,11 +7,10 @@ import Attribution from '../components/Attribution.vue'
 import DataTable, { type Column } from '../components/DataTable.vue'
 import EmptyState from '../components/EmptyState.vue'
 import Pager from '../components/Pager.vue'
+import SeriesChart from '../components/SeriesChart.vue'
 import { useQuerySearch } from '../composables/useQuerySearch'
 import { absoluteTime, fmtNum, fmtValue, relativeTime } from '../lib/format'
 import { dimsLabel, groupSeries, isNumericSeries, MAX_SERIES, sortPeriods } from '../lib/series'
-
-import SeriesChart from '../components/SeriesChart.vue'
 
 const PAGE_SIZE = 50
 const route = useRoute()
@@ -29,6 +28,7 @@ const indicators = ref<IndicatorRow[]>([])
 const countries = ref<CountryRow[]>([])
 const total = ref(0)
 const loading = ref(false)
+const sourcesLoaded = ref(false)
 const error = ref<string | null>(null)
 const series = ref<Series | null>(null)
 // Watch sources have no countries: a lone "" entry means we go straight to the series for country "".
@@ -61,10 +61,16 @@ async function guarded<T>(fn: () => Promise<T>, apply: (v: T) => void, fallback:
 }
 
 async function loadSources() {
+  const first = step.value === 1
+  if (first) loading.value = true
   try {
     sources.value = await apiGet<Source[]>('/api/sources')
+    if (first) error.value = null
   } catch (e) {
-    error.value = e instanceof ApiError ? e.detail : 'Could not load sources'
+    if (first) error.value = e instanceof ApiError ? e.detail : 'Could not load sources'
+  } finally {
+    if (first) loading.value = false
+    sourcesLoaded.value = true
   }
 }
 
@@ -82,7 +88,7 @@ function load() {
   const s = encodeURIComponent(slug.value)
   const params = { q: q.value || undefined, page: page.value, page_size: PAGE_SIZE }
   if (step.value === 1) return loadSources().then(() => undefined)
-  if (!sources.value.length) loadSources()
+  if (!sourcesLoaded.value) loadSources()
   if (step.value === 2) {
     return guarded(() => apiGet<Paged<IndicatorRow>>(`/api/sources/${s}/indicators`, params), (v) => { indicators.value = v.items; total.value = v.total }, 'Could not load indicators')
   }
@@ -128,16 +134,14 @@ const points = computed(() => series.value?.points ?? [])
 const groups = computed(() => groupSeries(points.value))
 const numeric = computed(() => isNumericSeries(points.value))
 const selected = ref<string[]>([])
-const hasDims = computed(() => points.value.some((p) => dimsLabel(p.dims)))
 const chartLabels = computed(() => sortPeriods(points.value.map((p) => p.period)))
+const shownGroups = computed(() =>
+  numeric.value ? groups.value.filter((g) => selected.value.includes(g.key)).slice(0, MAX_SERIES) : groups.value,
+)
 const chartSeries = computed(() =>
-  groups.value
-    .map((g, i) => ({ g, i }))
-    .filter(({ g }) => selected.value.includes(g.key))
-    .slice(0, MAX_SERIES)
-    .map(({ g, i }) => ({
+  shownGroups.value.map((g, j) => ({
       label: g.label,
-      colorIndex: i % MAX_SERIES,
+      colorIndex: j,
       data: chartLabels.value.map((p) => {
         const v = g.values.get(p)
         return v === null || v === undefined ? null : Number(v)
@@ -147,15 +151,25 @@ const chartSeries = computed(() =>
 function onPickSeries(ev: Event) {
   const picked = [...(ev.target as HTMLSelectElement).selectedOptions].map((o) => o.value)
   selected.value = picked.slice(0, MAX_SERIES)
+  pointPage.value = 1
 }
 const chartAria = computed(() => `Line chart of ${indicatorName.value}${country.value ? ` for ${country.value}` : ''}: ${chartSeries.value.length} series over ${chartLabels.value.length} periods. The table below has the same values.`)
 
 const pointPage = ref(1)
 const historyPage = ref(1)
-const pointRows = computed(() => points.value.map((p, i) => ({ ...p, id: i, dimsText: dimsLabel(p.dims) || 'â€”' })))
+// Only the series shown in the chart, sorted by period (same order as the chart axis).
+const pointRows = computed(() => {
+  const rows: { id: number; period: string; series: string; value: string | null }[] = []
+  for (const period of chartLabels.value) {
+    for (const g of shownGroups.value) {
+      if (g.values.has(period)) rows.push({ id: rows.length, period, series: g.label, value: g.values.get(period) ?? null })
+    }
+  }
+  return rows
+})
 const pointCols = computed<Column[]>(() => [
   { key: 'period', label: 'Period' },
-  ...(hasDims.value ? [{ key: 'dimsText', label: 'Dimensions' }] : []),
+  ...(shownGroups.value.length > 1 ? [{ key: 'series', label: 'Series' }] : []),
   { key: 'value', label: 'Value', align: 'right' as const },
 ])
 const pagedPoints = computed(() => pointRows.value.slice((pointPage.value - 1) * PAGE_SIZE, pointPage.value * PAGE_SIZE))
@@ -194,11 +208,15 @@ const SIGN: Record<ChangeType, string> = { added: '+', altered: '~', removed: 'â
       </template>
     </nav>
 
-    <p v-if="error" class="error-text" role="alert">{{ error }}</p>
+    <div v-if="error" class="toolbar">
+      <p class="error-text" role="alert">{{ error }}</p>
+      <button type="button" class="btn secondary" @click="load">Retry</button>
+    </div>
 
     <!-- Step 1: source -->
     <template v-if="step === 1">
-      <EmptyState v-if="!sources.length && !error" title="No sources yet" hint="Sources appear here once they are configured." />
+      <p v-if="!sourcesLoaded && !error" class="muted">Loading sourcesâ€¦</p>
+      <EmptyState v-else-if="!sources.length && !error" title="No sources yet" hint="Sources appear here once they are configured." />
       <ul v-else class="grid">
         <li v-for="s in sources" :key="s.slug" class="card">
           <h2><RouterLink data-test="source-link" :to="{ name: 'explorer', params: { slug: s.slug } }">{{ s.name }}</RouterLink></h2>
@@ -218,7 +236,7 @@ const SIGN: Record<ChangeType, string> = { added: '+', altered: '~', removed: 'â
         @row-click="(r) => go({ slug, indicator: r.code })">
         <template #cell-name="{ row }">
           <RouterLink :to="{ name: 'explorer', params: { slug, indicator: row.code } }" @click.stop>{{ row.name || row.code }}</RouterLink>
-          <span v-if="row.name && row.name !== row.code" class="muted code"> {{ row.code }}</span>
+          <span v-if="row.name && row.name !== row.code" class="muted code">{{ row.code }}</span>
         </template>
         <template #cell-unit="{ row }">{{ row.unit ?? 'â€”' }}</template>
         <template #cell-points="{ row }">{{ fmtNum(row.points) }}</template>
@@ -298,7 +316,7 @@ const SIGN: Record<ChangeType, string> = { added: '+', altered: '~', removed: 'â
 .stack { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
 .series-pick { display: flex; flex-direction: column; gap: 6px; margin: 8px 0; max-width: 420px; }
 .series-pick select { min-height: 0; }
-.code { font-family: var(--font-mono); font-size: 0.85em; margin-left: 6px; }
+.code { display: block; font-family: var(--font-mono); font-size: 0.8em; }
 .chg { font-weight: 600; }
 .chg.added { color: var(--chg-added); }
 .chg.altered { color: var(--chg-altered); }
