@@ -159,6 +159,8 @@ def reject(
     session.rollback()
     try:
         run = reject_run(session_factory, run_id)
+    except SourceBusyError:
+        raise HTTPException(409, "source busy") from None
     except ValueError as e:
         raise HTTPException(409, str(e)) from None
     return {"id": run.id, "status": run.status}

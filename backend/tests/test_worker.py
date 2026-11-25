@@ -129,22 +129,14 @@ def test_sweep_stale_runs(db_session, session_factory, source):
     assert r2.status == "ok" and r3.status == "queued"
 
 
-@pytest.fixture
-def held_lock(db_engine):
-    """Hold the per-source advisory lock from a separate real connection."""
-    conns = []
-
-    def hold(source_id):
-        c = db_engine.connect()
-        c.execute(text("SELECT pg_advisory_lock(:ns, :sid)"),
-                  {"ns": pipeline.LOCK_NAMESPACE, "sid": source_id})
-        conns.append((c, source_id))
-
-    yield hold
-    for c, sid in conns:
-        c.execute(text("SELECT pg_advisory_unlock(:ns, :sid)"),
-                  {"ns": pipeline.LOCK_NAMESPACE, "sid": sid})
-        c.close()
+def test_sweep_skips_run_whose_source_lock_is_held(db_session, session_factory, source, held_lock):
+    r = Run(source_id=source.id, status="running")
+    db_session.add(r)
+    db_session.commit()
+    held_lock(source.id)
+    assert sweep_stale_runs(session_factory) == 0
+    db_session.expire_all()
+    assert r.status == "running"
 
 
 def test_busy_source_raises_and_creates_no_run(db_session, session_factory, fakes, held_lock):

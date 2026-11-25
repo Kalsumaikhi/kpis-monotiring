@@ -42,6 +42,13 @@ def test_empty_password_config_returns_503(client, monkeypatch):
         assert r.json() == {"detail": "dashboard password not configured"}
 
 
+def test_placeholder_password_returns_503(client, monkeypatch):
+    monkeypatch.setattr(get_settings(), "dashboard_password", "change-me")
+    r = client.get("/api/sources", auth=("u", "change-me"))
+    assert r.status_code == 503
+    assert r.json() == {"detail": "dashboard password not configured"}
+
+
 def test_health_is_public(client):
     r = client.get("/api/health", auth=None)
     assert r.status_code == 200 and r.json() == {"status": "ok"}
@@ -239,14 +246,12 @@ def test_reject_pending(client, db_session, pending):
     assert client.post(f"/api/runs/{run.id}/reject").status_code == 409
 
 
-def test_approve_source_busy_409(client, pending, monkeypatch):
-    _, run = pending
-
-    def busy(*a, **k):
-        raise pipeline.SourceBusyError("busy")
-
-    monkeypatch.setattr("app.api.routes_runs.approve_run", busy)
+def test_approve_and_reject_source_busy_409(client, pending, held_lock):
+    src, run = pending
+    held_lock(src.id)
     r = client.post(f"/api/runs/{run.id}/approve")
+    assert r.status_code == 409 and r.json()["detail"] == "source busy"
+    r = client.post(f"/api/runs/{run.id}/reject")
     assert r.status_code == 409 and r.json()["detail"] == "source busy"
 
 

@@ -33,6 +33,7 @@ services:
   worker:
     build: ./backend
     command: python -m app.worker
+    stop_grace_period: 10m
     env_file: .env
     environment:
       RAW_DIR: /data/raw

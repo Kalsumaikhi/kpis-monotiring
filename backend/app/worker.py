@@ -13,7 +13,8 @@ from sqlalchemy import select, update
 
 from app.connectors.registry import CONNECTORS, sync_sources
 from app.core.pipeline import (
-    Notifier, RunNotQueuedError, SessionFactory, SourceBusyError, run_source,
+    Notifier, RunNotQueuedError, SessionFactory, SourceBusyError, _acquire_source_lock,
+    _safe_error, run_source,
 )
 from app.models import Run, Source
 
@@ -96,7 +97,7 @@ def poll_queued_once(session_factory: SessionFactory, notifier: Notifier | None)
         except Exception as e:  # noqa: BLE001
             log.exception("queued run %s (%s) crashed", run_id, slug)
             try:
-                _mark_failed(session_factory, run_id, f"{type(e).__name__}: {e}"[:2000])
+                _mark_failed(session_factory, run_id, _safe_error(e))
             except Exception:  # noqa: BLE001
                 log.exception("could not mark run %s failed", run_id)
     return started
@@ -115,15 +116,31 @@ def _mark_failed(session_factory: SessionFactory, run_id: int, error: str) -> No
 
 
 def sweep_stale_runs(session_factory: SessionFactory) -> int:
-    """At startup only one worker exists, so any `running` run is orphaned."""
+    """Mark orphaned `running` runs failed, unless a live process holds the source lock."""
     session = session_factory()
     try:
-        res = session.execute(
-            update(Run).where(Run.status == "running")
-            .values(status="failed", error=STALE_ERROR, finished_at=datetime.now(timezone.utc))
-        )
-        session.commit()
-        return res.rowcount
+        rows = session.execute(
+            select(Run.id, Run.source_id).where(Run.status == "running").order_by(Run.id)
+        ).all()
+        session.rollback()
+        swept = 0
+        for run_id, source_id in rows:
+            try:
+                release = _acquire_source_lock(session, source_id)
+            except SourceBusyError:
+                log.info("run %s not swept: source %s is being run elsewhere", run_id, source_id)
+                continue
+            try:
+                res = session.execute(
+                    update(Run).where(Run.id == run_id, Run.status == "running")
+                    .values(status="failed", error=STALE_ERROR,
+                            finished_at=datetime.now(timezone.utc))
+                )
+                session.commit()
+                swept += res.rowcount
+            finally:
+                release()
+        return swept
     finally:
         session.close()
 
@@ -150,6 +167,8 @@ def main() -> None:
     from app.notify.mattermost import notifier_from_settings
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    for noisy in ("httpx", "httpcore"):  # their INFO lines print request URLs (webhook secret)
+        logging.getLogger(noisy).setLevel(logging.WARNING)
     with SessionLocal() as session:
         sync_sources(session)
     swept = sweep_stale_runs(SessionLocal)

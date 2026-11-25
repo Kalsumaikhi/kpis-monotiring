@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import shutil
 import sys
 from pathlib import Path
@@ -36,6 +37,8 @@ def main(argv: list[str] | None = None) -> int:
     run_p.add_argument("slug")
     run_p.add_argument("--from-raw", type=Path, help="use this file instead of downloading")
     args = parser.parse_args(argv)
+    for noisy in ("httpx", "httpcore"):  # their INFO lines print request URLs (webhook secret)
+        logging.getLogger(noisy).setLevel(logging.WARNING)
 
     if args.cmd == "sync-sources":
         with SessionLocal() as session:

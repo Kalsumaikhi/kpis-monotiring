@@ -164,7 +164,7 @@ def _notify(session: Session, run: Run, notifier) -> None:
         source = session.get(Source, run.source_id)
         notifier.notify_run(run, source, _top_indicators(session, run), _streak(session, run))
     except Exception as e:  # noqa: BLE001 - notifier problems must not fail the run
-        log.exception("notifier failed for run %s", run.id)
+        log.error("notifier failed for run %s: %s", run.id, _safe_error(e))
         session.rollback()
         session.execute(
             update(Run).where(Run.id == run.id).values(notify_error=_safe_error(e))
@@ -198,8 +198,9 @@ def _finish(session: Session, run: Run, status: str, diff: DiffResult, metas, vi
     if warnings:
         run.error = "; ".join(warnings)[:2000]
     run.finished_at = _now()
-    _upsert_indicators(session, run.source_id, metas)
     if status != "suspect_pending":
+        # Metadata of an unapproved (held) file must not reach the indicators table.
+        _upsert_indicators(session, run.source_id, metas)
         # Newer good data makes any earlier held run stale: approving it would re-apply old removals.
         session.execute(
             update(Run)
@@ -300,10 +301,16 @@ def run_source(
 
 def approve_run(session_factory: SessionFactory, run_id: int, notifier: Notifier | None = None) -> Run:
     session = session_factory()
+    release = None
     try:
         run = session.get(Run, run_id)
         if run is None:
             raise ValueError(f"run {run_id} not found")
+        source_id = run.source_id
+        session.rollback()  # end the read transaction; state is re-read under the lock
+        release = _acquire_source_lock(session, source_id)  # SourceBusyError if busy
+        run = session.get(Run, run_id)
+        session.refresh(run)
         latest = session.scalar(
             select(func.max(Run.id)).where(
                 Run.source_id == run.source_id, Run.status == "suspect_pending"
@@ -320,6 +327,7 @@ def approve_run(session_factory: SessionFactory, run_id: int, notifier: Notifier
             stage_rows(session, _canonical_rows(parsed.rows))
             diff = compute_diff(session, source.id, parsed.complete)
             apply_diff(session, source.id, run.id, parsed.complete, record_changes=True)
+            run.trigger = "approve"
             _finish(session, run, "ok", diff, parsed.indicators, parsed.vintage, parsed.warnings)
         except Exception:
             session.rollback()
@@ -328,13 +336,23 @@ def approve_run(session_factory: SessionFactory, run_id: int, notifier: Notifier
         return _detach(session, run)
     finally:
         session.close()
+        if release is not None:
+            release()
 
 
 def reject_run(session_factory: SessionFactory, run_id: int) -> Run:
     session = session_factory()
+    release = None
     try:
         run = session.get(Run, run_id)
-        if run is None or run.status != "suspect_pending":
+        if run is None:
+            raise ValueError(f"run {run_id} not found")
+        source_id = run.source_id
+        session.rollback()
+        release = _acquire_source_lock(session, source_id)  # SourceBusyError if busy
+        run = session.get(Run, run_id)
+        session.refresh(run)
+        if run.status != "suspect_pending":
             raise ValueError(f"run {run_id} is not suspect_pending")
         run.status = "rejected"
         run.finished_at = _now()
@@ -342,6 +360,8 @@ def reject_run(session_factory: SessionFactory, run_id: int) -> Run:
         return _detach(session, run)
     finally:
         session.close()
+        if release is not None:
+            release()
 
 
 def preview_changes(

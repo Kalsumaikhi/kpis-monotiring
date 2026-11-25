@@ -38,7 +38,7 @@ Note: the compose file was validated with `docker compose config` only. It was n
 | `DATABASE_URL` | `postgresql+psycopg://kpi:kpi@localhost:5432/kpi` (`.env.example`: host `db`) | SQLAlchemy URL |
 | `MATTERMOST_WEBHOOK_URL` | empty | Incoming webhook; empty disables alerts |
 | `DASHBOARD_BASE_URL` | `http://localhost:8000` | Base URL used in alert links |
-| `DASHBOARD_PASSWORD` | empty | Shared HTTP Basic password; empty makes protected routes return 503 |
+| `DASHBOARD_PASSWORD` | empty | Shared HTTP Basic password; empty or the placeholder `change-me` makes protected routes return 503 |
 | `RAW_DIR` | `/data/raw` | Where downloaded raw files are kept |
 | `RAW_RETENTION_RUNS` | `5` | Raw files kept per source |
 | `SUSPECT_REMOVAL_RATIO` | `0.2` | Removal share above which a run is held as suspect |

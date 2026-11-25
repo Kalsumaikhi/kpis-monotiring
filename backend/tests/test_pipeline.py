@@ -224,3 +224,86 @@ def test_parse_warnings_stored_in_run_error(env, db_session):
     run = pipeline.run_source(sf, "fake")
     assert run.status == "ok"
     assert "incomplete: 1 indicators failed: X" in run.error
+
+
+def test_approve_and_reject_refuse_when_source_busy(env, db_session, held_lock):
+    src, conn, sf = env
+    _baseline_ten(conn, sf)
+    run = pipeline.run_source(sf, "fake")
+    assert run.status == "suspect_pending"
+    held_lock(src.id)
+    with pytest.raises(pipeline.SourceBusyError):
+        pipeline.approve_run(sf, run.id)
+    with pytest.raises(pipeline.SourceBusyError):
+        pipeline.reject_run(sf, run.id)
+    db_session.expire_all()
+    assert db_session.get(Run, run.id).status == "suspect_pending"
+    assert count_dp(db_session, src) == 10
+
+
+def test_second_approve_after_first_is_refused_and_lock_released(env, db_session, db_engine):
+    src, conn, sf = env
+    _baseline_ten(conn, sf)
+    run = pipeline.run_source(sf, "fake")
+    assert pipeline.approve_run(sf, run.id).trigger == "approve"
+    with pytest.raises(ValueError):
+        pipeline.approve_run(sf, run.id)
+    with pytest.raises(ValueError):
+        pipeline.reject_run(sf, run.id)
+    assert db_session.scalar(select(func.count()).select_from(Change)) == 3
+    with db_engine.connect() as c:  # lock was released on every path
+        from sqlalchemy import text
+        assert c.execute(text("SELECT pg_try_advisory_lock(:ns, :sid)"),
+                         {"ns": pipeline.LOCK_NAMESPACE, "sid": src.id}).scalar()
+        c.execute(text("SELECT pg_advisory_unlock(:ns, :sid)"),
+                  {"ns": pipeline.LOCK_NAMESPACE, "sid": src.id})
+
+
+def test_notifier_http_error_does_not_log_webhook_url(env, db_session, caplog):
+    import httpx
+    src, conn, sf = env
+    conn.rows = [raw("AT", "2020", 1)]
+    url = "https://mm.example.com/hooks/SECRETKEY"
+    n = RecordingNotifier()
+
+    def boom(*a):
+        req = httpx.Request("POST", url)
+        raise httpx.HTTPStatusError(f"500 for {url}", request=req,
+                                    response=httpx.Response(500, request=req))
+
+    n.notify_run = boom
+    with caplog.at_level("DEBUG"):
+        run = pipeline.run_source(sf, "fake", notifier=n)
+    assert run.notify_error and "SECRETKEY" not in run.notify_error
+    assert "hooks/" not in caplog.text and "SECRETKEY" not in caplog.text
+    assert "notifier failed" in caplog.text
+
+
+def test_failure_streak_counts_consecutive_failed_runs(env, db_session):
+    src, conn, sf = env
+    conn.rows = [raw("AT", "2020", 1)]
+    pipeline.run_source(sf, "fake")
+    conn.fail_download = True
+    n = RecordingNotifier()
+    for _ in range(3):
+        pipeline.run_source(sf, "fake", notifier=n)
+    assert [c[2] for c in n.calls] == [1, 2, 3]
+
+
+def test_suspect_pending_does_not_upsert_indicators_until_approved(env, db_session):
+    from app.models import Indicator
+    src, conn, sf = env
+    conn.rows = [raw(f"C{i}", "2020", i) for i in range(10)]
+    pipeline.run_source(sf, "fake")
+    db_session.execute(Indicator.__table__.update().where(Indicator.source_id == src.id)
+                       .values(name="old name"))
+    db_session.commit()
+    conn.rows = conn.rows[:7]
+    run = pipeline.run_source(sf, "fake")
+    assert run.status == "suspect_pending"
+    db_session.expire_all()
+    name = select(Indicator.name).where(Indicator.source_id == src.id)
+    assert db_session.scalar(name) == "old name"
+    pipeline.approve_run(sf, run.id)
+    db_session.expire_all()
+    assert db_session.scalar(name) == "Indicator I"

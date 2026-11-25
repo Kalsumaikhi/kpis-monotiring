@@ -8,6 +8,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session
 
+from app.core import pipeline
 from app.core.canonical import RawRow, to_canonical
 from app.core.diff import apply_diff, stage_rows
 from app.models import Run, Source
@@ -118,3 +119,21 @@ def session_factory(db_session, monkeypatch, tmp_path):
     monkeypatch.setattr(get_settings(), "raw_dir", str(tmp_path))
     connection = db_session.get_bind()
     return lambda: Session(bind=connection, join_transaction_mode="create_savepoint")
+
+
+@pytest.fixture
+def held_lock(db_engine):
+    """Hold the per-source advisory lock from a separate real connection."""
+    conns = []
+
+    def hold(source_id):
+        c = db_engine.connect()
+        c.execute(text("SELECT pg_advisory_lock(:ns, :sid)"),
+                  {"ns": pipeline.LOCK_NAMESPACE, "sid": source_id})
+        conns.append((c, source_id))
+
+    yield hold
+    for c, sid in conns:
+        c.execute(text("SELECT pg_advisory_unlock(:ns, :sid)"),
+                  {"ns": pipeline.LOCK_NAMESPACE, "sid": sid})
+        c.close()

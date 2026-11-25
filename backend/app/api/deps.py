@@ -25,9 +25,9 @@ def get_session_factory() -> Callable[[], Session]:
 
 
 def require_auth(credentials: HTTPBasicCredentials | None = Depends(_basic)) -> None:
-    """Any username plus DASHBOARD_PASSWORD. An empty configured password never matches."""
+    """Any username plus DASHBOARD_PASSWORD. An empty or placeholder ("change-me") password is treated as unconfigured."""
     expected = get_settings().dashboard_password
-    if not expected:
+    if not expected or expected == "change-me":
         raise HTTPException(503, "dashboard password not configured")
     if credentials is None or not secrets.compare_digest(
         credentials.password.encode("utf-8"), expected.encode("utf-8")
