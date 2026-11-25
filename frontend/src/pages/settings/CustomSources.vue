@@ -19,6 +19,10 @@ const importOpen = ref(false)
 const toDelete = ref<WatchTarget | null>(null)
 const busyId = ref<number | null>(null)
 const note = ref('')
+const formComp = ref<{ dirty: boolean } | null>(null)
+type FormReq = { target: WatchTarget | null; sourceName: string; advanced: boolean }
+const pendingForm = ref<FormReq | null>(null)
+const addBtn = ref<HTMLButtonElement | null>(null)
 
 const sourceNames = computed(() => sources.value.map((s) => s.name))
 
@@ -34,7 +38,11 @@ async function load() {
 }
 onMounted(load)
 
-async function openForm(f: { target: WatchTarget | null; sourceName: string; advanced: boolean }) {
+async function openForm(f: FormReq, force = false) {
+  if (!force && form.value && formComp.value?.dirty) {
+    pendingForm.value = f
+    return
+  }
   form.value = { key: `${f.target?.id ?? 'new'}-${Date.now()}`, ...f }
   await nextTick()
   formWrap.value?.scrollIntoView?.({ block: 'nearest' })
@@ -42,10 +50,23 @@ async function openForm(f: { target: WatchTarget | null; sourceName: string; adv
 const openAdd = () => openForm({ target: null, sourceName: '', advanced: false })
 const openEdit = (s: CustomSource, t: WatchTarget, advanced = false) => openForm({ target: t, sourceName: s.name, advanced })
 
+async function closeForm(targetId: number | null) {
+  form.value = null
+  await nextTick()
+  const el = targetId !== null ? document.querySelector<HTMLElement>(`[data-test=edit-${targetId}]`) : null
+  ;(el ?? addBtn.value)?.focus()
+}
+function discardAndOpen() {
+  const f = pendingForm.value
+  pendingForm.value = null
+  if (f) void openForm(f, true)
+}
+
 async function onSaved() {
   const adding = !form.value?.target
-  form.value = null
+  const id = form.value?.target?.id ?? null
   await load()
+  await closeForm(id)
   show(adding ? 'KPI added' : 'KPI saved')
   if (adding) note.value = "New KPIs are checked silently the first time — you'll be alerted from the second change on."
 }
@@ -96,7 +117,7 @@ const shortUrl = (u: string) => u.replace(/^https?:\/\//i, '')
         <p class="muted">Web pages and API links you want to watch. Each KPI is one link.</p>
       </div>
       <div class="toolbar">
-        <button type="button" class="btn" data-test="add" @click="openAdd">Add KPI</button>
+        <button ref="addBtn" type="button" class="btn" data-test="add" @click="openAdd">Add KPI</button>
         <button type="button" class="btn secondary" data-test="import" @click="importOpen = true">Import from Excel</button>
       </div>
     </div>
@@ -105,7 +126,7 @@ const shortUrl = (u: string) => u.replace(/^https?:\/\//i, '')
     <p v-if="error" class="error-text" role="alert">{{ error }}</p>
 
     <div v-if="form" ref="formWrap" class="formwrap">
-      <TargetForm :key="form.key" :source-names="sourceNames" :target="form.target" :source-name="form.sourceName" :open-advanced="form.advanced" @saved="onSaved" @cancel="form = null" />
+      <TargetForm ref="formComp" :key="form.key" :source-names="sourceNames" :target="form.target" :source-name="form.sourceName" :open-advanced="form.advanced" @saved="onSaved" @cancel="closeForm(form.target?.id ?? null)" />
     </div>
 
     <p v-if="loading" class="muted">Loading…</p>
@@ -125,7 +146,7 @@ const shortUrl = (u: string) => u.replace(/^https?:\/\//i, '')
                 <div v-if="!t.enabled" class="muted small">Disabled</div>
                 <button v-if="t.noisy" type="button" class="noisy" :data-test="`noisy-${t.id}`" @click="openEdit(s, t, true)">⚠ Noisy — set a focus area</button>
               </td>
-              <td class="url"><a :href="t.url" target="_blank" rel="noopener" :title="t.url">{{ shortUrl(t.url) }}</a></td>
+              <td class="url"><a :href="t.url" target="_blank" rel="noopener noreferrer" :title="t.url">{{ shortUrl(t.url) }}</a></td>
               <td>
                 <StatusBadge :status="t.last_status" />
                 <div v-if="t.last_error" class="error-text small">{{ t.last_error }}</div>
@@ -148,6 +169,10 @@ const shortUrl = (u: string) => u.replace(/^https?:\/\//i, '')
       :open="!!toDelete" title="Delete this KPI?" message="Deleting removes this KPI's history. No alert is sent."
       confirm-label="Delete" danger @confirm="doDelete" @cancel="toDelete = null"
     />
+    <ConfirmDialog
+      :open="!!pendingForm" title="Discard unsaved changes?" message="The form you have open has changes that are not saved."
+      confirm-label="Discard changes" danger @confirm="discardAndOpen" @cancel="pendingForm = null"
+    />
     <ImportDialog :open="importOpen" @close="importOpen = false" @imported="onImported" />
   </section>
 </template>
@@ -168,7 +193,7 @@ tbody tr:last-child td { border-bottom: 0; }
 .small { font-size: 0.8125rem; }
 .acts { display: flex; gap: 6px; flex-wrap: wrap; }
 .acts .btn { min-height: 32px; padding: 0 10px; }
-.noisy { display: inline-block; white-space: nowrap; margin-top: 4px; font: inherit; font-size: 0.8125rem; font-weight: 600; cursor: pointer; background: transparent; color: var(--status-warn); border: 1px solid currentColor; border-radius: 999px; padding: 0 10px; }
+.noisy { display: block; width: fit-content; margin-top: 6px; white-space: nowrap; margin-top: 4px; font: inherit; font-size: 0.8125rem; font-weight: 600; cursor: pointer; background: transparent; color: var(--status-warn); border: 1px solid currentColor; border-radius: 999px; padding: 0 10px; }
 .noisy:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 .empty { padding: 12px 0; }
 </style>

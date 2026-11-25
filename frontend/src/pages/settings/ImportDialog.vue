@@ -21,6 +21,8 @@ const busy = ref(false)
 const dialog = ref<HTMLElement | null>(null)
 const fileInput = ref<HTMLInputElement | null>(null)
 let opener: HTMLElement | null = null
+let reqId = 0
+const tryClose = () => { if (!busy.value) emit('close') }
 
 const importable = computed(() => preview.value?.rows.filter((r) => r.status === 'new_source' || r.status === 'existing_source').length ?? 0)
 const skipped = computed(() => preview.value?.rows.filter((r) => r.status === 'duplicate').length ?? 0)
@@ -47,6 +49,7 @@ function downloadTemplate() {
 async function onFile(ev: Event) {
   const file = (ev.target as HTMLInputElement).files?.[0]
   if (!file) return
+  const mine = ++reqId
   busy.value = true
   error.value = ''
   preview.value = null
@@ -54,25 +57,32 @@ async function onFile(ev: Event) {
   try {
     const fd = new FormData()
     fd.append('file', file)
-    preview.value = await apiUpload<ImportPreview>('/api/watch-targets/import/preview', fd)
+    const res = await apiUpload<ImportPreview>('/api/watch-targets/import/preview', fd)
+    if (mine === reqId) preview.value = res
   } catch (e) {
+    if (mine !== reqId) return
     error.value = e instanceof ApiError
       ? (e.status === 413 ? 'That file is too large (max 2 MB).' : e.detail)
       : 'Could not read the file'
   } finally {
-    busy.value = false
+    if (mine === reqId) busy.value = false
   }
 }
 
 async function confirm() {
   if (!preview.value || importable.value === 0) return
+  const mine = ++reqId
   busy.value = true
   error.value = ''
   try {
-    result.value = await apiSend<ImportConfirmResult>('POST', '/api/watch-targets/import/confirm', { token: preview.value.token })
-    preview.value = null
+    const res = await apiSend<ImportConfirmResult>('POST', '/api/watch-targets/import/confirm', { token: preview.value.token })
+    // The import happened server-side even if the dialog was closed meanwhile: always refresh the list.
     emit('imported')
+    if (mine !== reqId) return
+    result.value = res
+    preview.value = null
   } catch (e) {
+    if (mine !== reqId) return
     if (e instanceof ApiError && e.status === 410) {
       error.value = 'Preview expired — upload again'
       preview.value = null
@@ -81,13 +91,13 @@ async function confirm() {
       error.value = e instanceof ApiError ? e.detail : 'Import failed'
     }
   } finally {
-    busy.value = false
+    if (mine === reqId) busy.value = false
   }
 }
 
 const FOCUSABLE = 'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])'
 function onKey(e: KeyboardEvent) {
-  if (e.key === 'Escape') { e.preventDefault(); e.stopImmediatePropagation(); emit('close'); return }
+  if (e.key === 'Escape') { e.preventDefault(); e.stopImmediatePropagation(); tryClose(); return }
   if (e.key !== 'Tab' || !dialog.value) return
   const items = Array.from(dialog.value.querySelectorAll<HTMLElement>(FOCUSABLE))
   if (!items.length) return
@@ -98,6 +108,8 @@ function onKey(e: KeyboardEvent) {
 
 watch(() => props.open, async (o) => {
   if (o) {
+    reqId++
+    busy.value = false
     reset()
     opener = document.activeElement as HTMLElement | null
     document.addEventListener('keydown', onKey, true)
@@ -105,7 +117,10 @@ watch(() => props.open, async (o) => {
     fileInput.value?.focus()
   } else {
     document.removeEventListener('keydown', onKey, true)
-    if (opener?.isConnected) opener.focus()
+    reqId++ // late responses after close are ignored
+    busy.value = false
+    const target = opener && opener.isConnected ? opener : document.querySelector<HTMLElement>('main')
+    target?.focus()
     opener = null
   }
 }, { immediate: true })
@@ -114,7 +129,7 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onKey, true))
 
 <template>
   <Teleport to="body">
-    <div v-if="open" class="overlay" @click.self="emit('close')">
+    <div v-if="open" class="overlay" @click.self="tryClose">
       <div ref="dialog" class="dialog" role="dialog" aria-modal="true" aria-labelledby="imp-title">
         <h2 id="imp-title">Import KPIs from Excel or CSV</h2>
         <p class="muted">One row per KPI with the columns <code>Source name</code>, <code>KPI name</code> and <code>Link</code>.
@@ -159,7 +174,7 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onKey, true))
         </div>
 
         <div class="actions">
-          <button type="button" class="btn secondary" @click="emit('close')">{{ result ? 'Close' : 'Cancel' }}</button>
+          <button type="button" class="btn secondary" :disabled="busy" @click="emit('close')">{{ result ? 'Close' : 'Cancel' }}</button>
           <button v-if="!result" type="button" class="btn" :disabled="busy || importable === 0" @click="confirm">Import {{ importable }} KPIs</button>
         </div>
       </div>

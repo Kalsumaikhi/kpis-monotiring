@@ -52,6 +52,13 @@ async function patch(s: Source, body: { enabled?: boolean; cron?: string }) {
   }
 }
 
+function saveCron(s: Source) {
+  const value = (cron[s.slug] ?? '').trim()
+  if (busy[s.slug] || value === (s.cron ?? '')) return
+  cron[s.slug] = value
+  return patch(s, { cron: value })
+}
+
 async function toggle(s: Source, ev: Event) {
   const enabled = (ev.target as HTMLInputElement).checked
   s.enabled = enabled
@@ -103,9 +110,9 @@ async function runNow(s: Source) {
                 <input
                   v-model="cron[s.slug]" type="text" class="mono" :data-test="`cron-${s.slug}`" :aria-label="`${s.name} schedule`"
                   :aria-invalid="cronError[s.slug] ? 'true' : 'false'" :aria-describedby="cronError[s.slug] ? `ce-${s.slug}` : undefined"
-                  @keydown.enter.prevent="patch(s, { cron: cron[s.slug] })"
+                  @keydown.enter.prevent="saveCron(s)"
                 />
-                <button type="button" class="btn secondary" :data-test="`save-${s.slug}`" :disabled="busy[s.slug] || cron[s.slug] === (s.cron ?? '')" @click="patch(s, { cron: cron[s.slug] })">Save</button>
+                <button type="button" class="btn secondary" :data-test="`save-${s.slug}`" :disabled="busy[s.slug] || (cron[s.slug] ?? '').trim() === (s.cron ?? '')" @click="saveCron(s)">Save</button>
               </div>
               <div class="presets">
                 <button v-for="p in PRESETS" :key="p.value" type="button" class="chip" @click="cron[s.slug] = p.value">{{ p.label }}</button>

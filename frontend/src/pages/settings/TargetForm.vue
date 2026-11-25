@@ -25,10 +25,16 @@ const urlOk = computed(() => /^https?:\/\/[^\s/]+\S*$/i.test(url.value.trim()))
 const valid = computed(() => source.value.trim() !== '' && kpi.value.trim() !== '' && urlOk.value)
 const urlTouched = ref(false)
 
-watch(() => props.openAdvanced, (v) => { if (v) advanced.value = true })
+const initial = JSON.stringify([source.value, kpi.value, url.value, selector.value, kind.value, useBrowser.value])
+const dirty = computed(() => JSON.stringify([source.value, kpi.value, url.value, selector.value, kind.value, useBrowser.value]) !== initial)
+defineExpose({ dirty })
+// Any change to what is tested makes an old preview misleading.
+watch([url, selector, kind, useBrowser], () => { testResult.value = null; testError.value = '' })
+
 onMounted(async () => {
   await nextTick()
-  first.value?.focus()
+  if (props.openAdvanced) document.getElementById('tf-selector')?.focus()
+  else first.value?.focus()
 })
 
 function extras() {
@@ -77,7 +83,6 @@ async function testLink() {
 const blockedWords = computed(() => {
   const err = (testResult.value?.error ?? '').toLowerCase()
   if (err.includes('destination')) return "Internal addresses aren't allowed."
-  if (err.includes('robots')) return "This site doesn't allow automated access."
   return "This site doesn't allow automated access."
 })
 const jsonRows = computed(() => (testResult.value?.json_preview ?? []).map((r) => ({ path: r.path, value: typeof r.value === 'string' ? r.value : JSON.stringify(r.value) })))
