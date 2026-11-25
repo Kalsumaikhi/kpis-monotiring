@@ -36,6 +36,11 @@ class Connector(Protocol):
     area: str
     access: str
     raw_suffix: str  # required: extension of the single raw file, e.g. ".zip"
+    # Optional: `credential_hosts: tuple[str, ...] = ()`. Lowercase hostnames the connector
+    # may send a stored key to. When the source has a key (Source.credential_id) the pipeline
+    # adds it, via an httpx request hook on the client passed to download(), to https requests
+    # (including redirect hops) whose host is listed; other hosts and http never get it.
+    # Absent or empty means the source does not support keys and a stored key is ignored.
 
     def download(self, client: httpx.Client, dest: Path) -> None:
         """Write exactly one raw file at `dest`."""

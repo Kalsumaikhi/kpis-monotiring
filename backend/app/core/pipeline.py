@@ -18,6 +18,7 @@ from sqlalchemy import Engine, case, delete, func, select, text, update
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
+from app import credentials as creds
 from app.connectors.base import IndicatorMeta
 from app.connectors.registry import resolve_connector
 from app.core import raw_store, rollup
@@ -229,11 +230,11 @@ def _detach(session: Session, run: Run) -> Run:
     return run
 
 
-def _fail(session: Session, run_id: int, e: Exception) -> Run:
+def _fail(session: Session, run_id: int, e: Exception, cred=None, message: str | None = None) -> Run:
     session.rollback()
     run = session.get(Run, run_id)
     run.status = "failed"
-    run.error = _safe_error(e)
+    run.error = creds.redact(message if message is not None else _safe_error(e), cred)
     run.finished_at = _now()
     session.commit()
     return run
@@ -306,6 +307,57 @@ def _on_failed(session: Session, connector, run: Run) -> None:
         session.rollback()
 
 
+class _KeyFailure(Exception):
+    """A key problem; str(e) is the run error, stored as is."""
+
+
+class _KeyState:
+    """Per-run key bookkeeping shared with the httpx hooks."""
+
+    def __init__(self, cred: creds.Credential, hosts: tuple[str, ...]):
+        self.cred = cred
+        self.hosts = {h.lower() for h in hosts}
+        self.rejected: int | None = None
+
+    def on_request(self, request: httpx.Request) -> None:
+        # Called for every hop, so a redirect to another host (or to http) loses the key.
+        if request.url.scheme != "https" or request.url.host.lower() not in self.hosts:
+            return
+        url, headers = creds.apply(self.cred, str(request.url), {})
+        if url != str(request.url):
+            request.url = httpx.URL(url)
+        for k, v in headers.items():
+            request.headers[k] = v
+        request.extensions["kpi_keyed"] = True
+
+    def on_response(self, response: httpx.Response) -> None:
+        if response.request.extensions.get("kpi_keyed") and response.status_code in (401, 403) \
+                and self.rejected is None:
+            self.rejected = response.status_code
+
+
+def _key_hosts(connector) -> tuple[str, ...]:
+    return tuple(getattr(connector, "credential_hosts", ()) or ())
+
+
+def _load_key(session: Session, credential_id: int) -> creds.Credential:
+    try:
+        return creds.load(session, credential_id)
+    except creds.KeyUnavailable as e:
+        raise _KeyFailure(f"key unavailable ({e})") from None
+    except KeyError:
+        raise _KeyFailure("key unavailable (key not found)") from None
+
+
+def _record_key_use(session: Session, credential_id: int | None, error: str | None) -> None:
+    if credential_id is None:
+        return
+    try:
+        creds.mark_used(session, credential_id, error)
+    except Exception:  # noqa: BLE001 - bookkeeping must not change the run outcome
+        log.warning("could not record use of key %s", credential_id)
+
+
 def run_source(
     session_factory: SessionFactory,
     slug: str,
@@ -344,6 +396,9 @@ def run_source(
             session.commit()
         run_id = run.id
 
+        cred = None
+        key_id = source.credential_id if _key_hosts(connector) and from_raw is None else None
+        key_error: str | None = None
         try:
             suffix = connector.raw_suffix
             dest = raw_store.path_for(slug, run_id, suffix)
@@ -354,13 +409,31 @@ def run_source(
                     dest.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copyfile(from_raw, dest)
             else:
-                with httpx.Client(timeout=60, follow_redirects=True) as client:
-                    connector.download(client, dest)
+                hooks: dict = {}
+                state = None
+                if key_id is not None:
+                    cred = _load_key(session, key_id)
+                    state = _KeyState(cred, _key_hosts(connector))
+                    hooks = {"request": [state.on_request], "response": [state.on_response]}
+                try:
+                    with httpx.Client(timeout=60, follow_redirects=True, event_hooks=hooks) as client:
+                        connector.download(client, dest)
+                except Exception:
+                    if state is not None and state.rejected is not None:
+                        raise _KeyFailure(f"key rejected (HTTP {state.rejected})") from None
+                    raise
+                if state is not None and state.rejected is not None:
+                    raise _KeyFailure(f"key rejected (HTTP {state.rejected})")
         except Exception as e:  # noqa: BLE001
-            run = _fail(session, run_id, e)
+            if isinstance(e, _KeyFailure):
+                key_error = str(e)
+            run = _fail(session, run_id, e, cred, message=key_error)
+            _record_key_use(session, key_id, key_error)
             _on_failed(session, connector, run)
             _notify(session, run, notifier)
             return _detach(session, run)
+
+        _record_key_use(session, key_id, None)
 
         try:
             parsed = connector.parse(dest)
@@ -396,9 +469,10 @@ def run_source(
                 apply_diff(session, source.id, run_id, parsed.complete, record_changes=True,
                            exclude_indicators=excl)
                 status = "ok"
-            _finish(session, run, status, diff, parsed.indicators, parsed.vintage, parsed.warnings)
+            _finish(session, run, status, diff, parsed.indicators, parsed.vintage,
+                    [creds.redact(w, cred) for w in parsed.warnings])
         except Exception as e:  # noqa: BLE001
-            run = _fail(session, run_id, e)
+            run = _fail(session, run_id, e, cred)
             _on_failed(session, connector, run)
             _notify(session, run, notifier)
             return _detach(session, run)

@@ -13,7 +13,8 @@ from sqlalchemy.orm import Session
 from app.api.util import iso
 from app.api.deps import get_session
 from app.api.routes_kpis import attribution_for
-from app.models import Change, DataPoint, Run, Source
+from app.connectors.registry import resolve_connector
+from app.models import Change, DataPoint, Credential, Run, Source
 
 router = APIRouter()
 
@@ -21,6 +22,7 @@ router = APIRouter()
 class SourcePatch(BaseModel):
     enabled: bool | None = None
     cron: str | None = None
+    credential_id: int | None = None
 
 
 def _source_or_404(session: Session, slug: str) -> Source:
@@ -31,7 +33,8 @@ def _source_or_404(session: Session, slug: str) -> Source:
 
 
 def _serialise(source: Source, last_run: Run | None, last_change_at, rows_tracked, changes_30d, streak,
-               incomplete=False, noisy_targets=0, last_success_at=None):
+               incomplete=False, noisy_targets=0, last_success_at=None,
+               credential_name=None, credential_supported=False):
     return {
         "slug": source.slug,
         "name": source.name,
@@ -55,7 +58,19 @@ def _serialise(source: Source, last_run: Run | None, last_change_at, rows_tracke
         "incomplete": incomplete,
         "noisy_targets": noisy_targets,
         "last_success_at": iso(last_success_at),
+        "credential_id": source.credential_id,
+        "credential_name": credential_name,
+        "credential_supported": credential_supported,
     }
+
+
+def _supports_keys(session: Session, source: Source) -> bool:
+    if source.access == "watch":  # custom KPIs carry their keys on the targets
+        return False
+    try:
+        return bool(getattr(resolve_connector(session, source.slug), "credential_hosts", ()))
+    except KeyError:
+        return False
 
 
 def _noisy_counts(session: Session) -> dict[int, int]:
@@ -136,11 +151,13 @@ def list_sources(access: str | None = None, session: Session = Depends(get_sessi
     )
     incomplete = _incomplete_ids(session)
     noisy = _noisy_counts(session)
+    cred_names = dict(session.execute(select(Credential.id, Credential.name)).all())
     return [
         _serialise(
             s, last_runs.get(s.id), change_stats.get(s.id, (None, 0))[0],
             rows.get(s.id, 0), change_stats.get(s.id, (None, 0))[1], streaks.get(s.id, 0),
             s.id in incomplete, noisy.get(s.id, 0), last_success.get(s.id),
+            cred_names.get(s.credential_id), _supports_keys(session, s),
         )
         for s in sources
     ]
@@ -157,8 +174,13 @@ def patch_source(slug: str, body: SourcePatch, session: Session = Depends(get_se
         source.cron = body.cron
     if body.enabled is not None:
         source.enabled = body.enabled
+    if "credential_id" in body.model_fields_set:
+        if body.credential_id is not None and session.get(Credential, body.credential_id) is None:
+            raise HTTPException(422, "unknown key")
+        source.credential_id = body.credential_id
     session.commit()
-    return {"slug": source.slug, "enabled": source.enabled, "cron": source.cron}
+    return {"slug": source.slug, "enabled": source.enabled, "cron": source.cron,
+            "credential_id": source.credential_id}
 
 
 def _has_open_run(session: Session, source_id: int) -> bool:
