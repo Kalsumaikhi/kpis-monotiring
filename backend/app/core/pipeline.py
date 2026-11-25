@@ -229,6 +229,18 @@ def _finish(session: Session, run: Run, status: str, diff: DiffResult, metas, vi
     _safe_prune(session, run.source_id)
 
 
+def _after_run(session: Session, connector, run: Run) -> None:
+    """Optional connector hook for non-failed runs; its failure never fails the run."""
+    hook = getattr(connector, "after_run", None)
+    if hook is None:
+        return
+    try:
+        hook(session, run)
+    except Exception as e:  # noqa: BLE001
+        log.error("after_run failed for run %s: %s", run.id, _safe_error(e))
+        session.rollback()
+
+
 def run_source(
     session_factory: SessionFactory,
     slug: str,
@@ -311,6 +323,7 @@ def run_source(
             _notify(session, run, notifier)
             return _detach(session, run)
 
+        _after_run(session, connector, run)
         _notify(session, run, notifier)
         return _detach(session, run)
     finally:

@@ -31,8 +31,7 @@ def test_resolve_connector_static_and_watch(db_session):
     assert c.raw_suffix == ".json"
     assert c.access == "watch"
     assert c.area == "custom"
-    with pytest.raises(NotImplementedError):
-        c.download(None, None)
+    assert callable(c.after_run)
 
     with pytest.raises(KeyError):
         resolve_connector(db_session, "nope")

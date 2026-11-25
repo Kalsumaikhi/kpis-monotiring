@@ -58,8 +58,10 @@ def _serialise(source: Source, last_run: Run | None, last_change_at, rows_tracke
 
 
 def _noisy_counts(session: Session) -> dict[int, int]:
-    """Watch targets flagged as noisy, by source id. Hook for Task 4; nothing is flagged yet."""
-    return {}
+    """Number of noisy watch targets (changed in >8 of last 10 snapshots), by source id."""
+    from app.connectors.watch import noisy_counts
+
+    return noisy_counts(session)
 
 
 def _incomplete_ids(session: Session) -> set[int]:
