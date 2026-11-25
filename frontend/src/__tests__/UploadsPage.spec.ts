@@ -8,6 +8,7 @@ vi.mock('../api/client', async () => {
   const actual = await vi.importActual<typeof import('../api/client')>('../api/client')
   return { ...actual, apiGet: (...a: unknown[]) => apiGet(...a), apiUpload: (...a: unknown[]) => apiUpload(...a) }
 })
+import { ApiError } from '../api/client'
 import UploadsPage from '../pages/UploadsPage.vue'
 
 const manual = [{ slug: 'tge', name: 'TheGlobalEconomy.com', access: 'manual' }]
@@ -62,6 +63,41 @@ describe('UploadsPage', () => {
     Object.defineProperty(input.element, 'files', { value: [big], configurable: true })
     await input.trigger('change')
     expect(w.text()).toContain('File is larger than 50 MB')
+    expect(w.get('button[type=submit]').attributes('disabled')).toBeDefined()
+  })
+
+  async function fill(w: Awaited<ReturnType<typeof mountPage>>) {
+    await w.get('#up-who').setValue('  Bo  ')
+    const input = w.get('#up-file')
+    Object.defineProperty(input.element, 'files', { value: [new File(['a'], 'n.xlsx')], configurable: true })
+    await input.trigger('change')
+  }
+
+  it.each([[413, 'file too large (max 50 MB)', 'File is larger than 50 MB'], [404, 'source not found', 'source not found'], [422, 'uploads are only accepted for manual sources', 'uploads are only accepted for manual sources']])(
+    'shows error for %i', async (status, detail, shown) => {
+      apiUpload.mockRejectedValue(new ApiError(status, detail))
+      const w = await mountPage(manual)
+      await fill(w)
+      await w.get('form').trigger('submit')
+      await flushPromises()
+      expect(w.get('[role=alert]').text()).toBe(shown)
+      expect(w.text()).not.toContain('Review changes')
+    })
+
+  it('disables Upload while in flight and trims name', async () => {
+    let resolve!: (v: unknown) => void
+    apiUpload.mockReturnValue(new Promise((r) => { resolve = r }))
+    const w = await mountPage(manual)
+    expect(w.text()).toContain('Choose a source, enter your name and pick a file')
+    await fill(w)
+    await w.get('form').trigger('submit')
+    await flushPromises()
+    expect(w.get('button[type=submit]').attributes('disabled')).toBeDefined()
+    expect(w.get('button[type=submit]').text()).toBe('Upload')
+    expect(w.get('[role=status]').text()).toContain('Uploading…')
+    expect((apiUpload.mock.calls[0][1] as FormData).get('who')).toBe('Bo')
+    resolve({ run_id: 5 })
+    await flushPromises()
     expect(w.get('button[type=submit]').attributes('disabled')).toBeDefined()
   })
 })

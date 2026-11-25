@@ -48,17 +48,21 @@ function onFile(e: Event) {
   error.value = null
 }
 
+let listSeq = 0
 async function loadList() {
+  const mine = ++listSeq
   listLoading.value = true
   try {
     const res = await apiGet<{ items: UploadRow[]; total: number }>('/api/uploads', { page: page.value, page_size: PAGE_SIZE })
+    if (mine !== listSeq) return
     items.value = res.items
     total.value = res.total
     listError.value = null
   } catch (e) {
+    if (mine !== listSeq) return
     listError.value = e instanceof ApiError ? e.detail : 'Could not load past uploads'
   } finally {
-    listLoading.value = false
+    if (mine === listSeq) listLoading.value = false
   }
 }
 
@@ -131,9 +135,10 @@ onMounted(async () => {
         <p v-if="sizeError" id="up-size" class="err" role="alert">{{ sizeError }}</p>
       </div>
       <div class="actions">
-        <button type="submit" class="btn" :disabled="!canSubmit">{{ uploading ? 'Uploading…' : 'Upload' }}</button>
+        <button type="submit" class="btn" :disabled="!canSubmit" :aria-busy="uploading ? 'true' : 'false'">Upload</button>
         <span v-if="uploading" class="muted progress" role="status"><span class="bar" aria-hidden="true"></span>Uploading… please keep this page open.</span>
       </div>
+      <p v-if="!canSubmit && !uploading && !sizeError" class="muted hint">Choose a source, enter your name and pick a file</p>
       <p v-if="error" class="err" role="alert">{{ error }}</p>
       <div v-if="resultRun !== null" class="success" role="status">
         <strong>Upload received.</strong> It is waiting for your review before anything changes.
