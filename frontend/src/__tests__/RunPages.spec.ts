@@ -156,4 +156,53 @@ describe('RunDetailPage', () => {
     expect(apiGet.mock.calls.length).toBe(n)
     w.unmount()
   })
+
+  it('poll error keeps the page; 3 failures stop with a note', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'] })
+    let fail = false
+    const w = await mountDetail((path) => {
+      if (path === '/api/runs/7') { if (fail) throw new ApiError(0, 'Network error'); return run({ status: 'approve_queued' }) }
+      return path.endsWith('/changes') ? { items: [], total: 0, pending: true } : []
+    })
+    fail = true
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(w.text()).toContain('Run #7')
+    expect(w.text()).not.toContain('Network error')
+    await vi.advanceTimersByTimeAsync(10000)
+    expect(w.text()).toContain('Lost connection — refresh to check status')
+    expect(w.text()).toContain('Run #7')
+    w.unmount()
+  })
+
+  it('navigating between runs shows only the new run and no stale note', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'] })
+    apiGet.mockImplementation(async (path: string) => {
+      if (path === '/api/runs/1') return run({ id: 1, source: 'one', status: 'approve_queued' })
+      if (path === '/api/runs/2') return run({ id: 2, source: 'two', status: 'ok' })
+      return path.endsWith('/changes') ? { items: [], total: 0 } : []
+    })
+    const router = mkRouter()
+    await router.push('/runs/1')
+    const w = mount(RunDetailPage, { global: { plugins: [router] } })
+    await flushPromises()
+    await vi.advanceTimersByTimeAsync(10 * 60 * 1000 + 5000)
+    expect(w.text()).toContain('Still applying')
+    await router.push('/runs/2')
+    await flushPromises()
+    expect(w.text()).toContain('Run #2')
+    expect(w.text()).not.toContain('Run #1')
+    expect(w.text()).not.toContain('Still applying')
+    w.unmount()
+  })
+
+  it('formats large numbers but not years', async () => {
+    const w = await mountDetail((path) => {
+      if (path === '/api/runs/7') return run({ status: 'ok' })
+      return path.endsWith('/changes') ? { items: [ch({ change_type: 'altered', old: '11000000', new: '2020', period: '2020' })], total: 1 } : []
+    })
+    expect(w.text()).toContain('11,000,000')
+    expect(w.text()).toContain('→ 2020')
+    expect(w.find('span.old').attributes('title')).toBe('11000000')
+    w.unmount()
+  })
 })

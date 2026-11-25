@@ -10,7 +10,7 @@ import EmptyState from '../components/EmptyState.vue'
 import Pager from '../components/Pager.vue'
 import StatusBadge from '../components/StatusBadge.vue'
 import { useToast } from '../composables/useToast'
-import { absoluteTime, fmtDims, fmtNum, relativeTime } from '../lib/format'
+import { absoluteTime, fmtDims, fmtNum, fmtValue, relativeTime } from '../lib/format'
 
 const PAGE_SIZE = 50
 const POLL_MS = 5000
@@ -30,7 +30,6 @@ const changes = ref<ChangeItem[]>([])
 const changesTotal = ref(0)
 const changesLoading = ref(false)
 const changesError = ref<string | null>(null)
-const heldView = ref(false)
 const page = ref(1)
 const fType = ref<ChangeType | ''>('')
 const fIndicator = ref('')
@@ -40,6 +39,10 @@ const confirm = ref<'approve' | 'reject' | null>(null)
 const busy = ref(false)
 const pollNote = ref<string | null>(null)
 let pollTimer: ReturnType<typeof setInterval> | null = null
+let pollInFlight = false
+let pollFailures = 0
+let runSeq = 0
+let changesSeq = 0
 
 const isHeld = computed(() => run.value?.status === 'suspect_pending')
 const isApplying = computed(() => run.value?.status === 'approve_queued')
@@ -55,19 +58,28 @@ const columns: Column[] = [
 ]
 const SIGN: Record<ChangeType, string> = { added: '+', altered: '~', removed: '−' }
 
-async function loadRun(): Promise<void> {
+/** Returns true on success. With `keep`, a failure leaves the current run on screen. */
+async function loadRun(keep = false): Promise<boolean> {
+  const mine = ++runSeq
   try {
-    run.value = await apiGet<RunDetail>(`/api/runs/${runId.value}`)
+    const res = await apiGet<RunDetail>(`/api/runs/${runId.value}`)
+    if (mine !== runSeq) return false
+    run.value = res
     loadError.value = null
     notFound.value = false
+    return true
   } catch (e) {
+    if (mine !== runSeq) return false
+    if (keep && run.value) return false
     run.value = null
     if (e instanceof ApiError && e.status === 404) notFound.value = true
     else loadError.value = e instanceof ApiError ? e.detail : 'Could not load this run'
+    return false
   }
 }
 
 async function loadChanges(): Promise<void> {
+  const mine = ++changesSeq
   changesLoading.value = true
   changesError.value = null
   try {
@@ -75,19 +87,22 @@ async function loadChanges(): Promise<void> {
       change_type: fType.value, indicator: fIndicator.value.trim(), country: fCountry.value.trim(),
       page: page.value, page_size: PAGE_SIZE,
     })
+    if (mine !== changesSeq) return
     changes.value = res.items
     changesTotal.value = res.total
-    heldView.value = !!res.pending
   } catch (e) {
+    if (mine !== changesSeq) return
     changesError.value = e instanceof ApiError ? e.detail : 'Could not load changes'
   } finally {
-    changesLoading.value = false
+    if (mine === changesSeq) changesLoading.value = false
   }
 }
 
 async function loadAll() {
+  const id = runId.value
   loading.value = true
   await loadRun()
+  if (id !== runId.value) return
   loading.value = false
   if (run.value) {
     loadChanges()
@@ -97,10 +112,13 @@ async function loadAll() {
 }
 
 async function loadAttribution() {
-  if (!run.value) return
+  const id = runId.value
+  const slug = run.value?.source
+  if (!slug) return
   try {
     const sources = await apiGet<Source[]>('/api/sources')
-    attribution.value = sources.find((s) => s.slug === run.value?.source)?.attribution ?? null
+    if (id !== runId.value) return
+    attribution.value = sources.find((s) => s.slug === slug)?.attribution ?? null
   } catch {
     attribution.value = null
   }
@@ -109,20 +127,35 @@ async function loadAttribution() {
 function stopPolling() {
   if (pollTimer !== null) clearInterval(pollTimer)
   pollTimer = null
+  pollInFlight = false
 }
 
 function startPolling() {
   stopPolling()
   pollNote.value = null
+  pollFailures = 0
+  const id = runId.value
   const deadline = Date.now() + POLL_MAX_MS
   pollTimer = setInterval(async () => {
+    if (pollInFlight) return
     if (Date.now() >= deadline) {
       stopPolling()
       pollNote.value = 'Still applying — refresh later'
       return
     }
-    await loadRun()
-    if (pollTimer !== null && run.value && run.value.status !== 'approve_queued') {
+    pollInFlight = true
+    const ok = await loadRun(true)
+    if (id !== runId.value || pollTimer === null) return
+    pollInFlight = false
+    if (!ok) {
+      if (++pollFailures >= 3) {
+        stopPolling()
+        pollNote.value = 'Lost connection — refresh to check status'
+      }
+      return
+    }
+    pollFailures = 0
+    if (run.value && run.value.status !== 'approve_queued') {
       stopPolling()
       page.value = 1
       loadChanges()
@@ -133,40 +166,66 @@ function startPolling() {
 async function doApprove() {
   confirm.value = null
   busy.value = true
+  const id = runId.value
   try {
-    const res = await apiSend<RunStatusResult>('POST', `/api/runs/${runId.value}/approve`)
+    const res = await apiSend<RunStatusResult>('POST', `/api/runs/${id}/approve`)
+    if (id !== runId.value) return
     if (run.value) run.value = { ...run.value, status: res.status }
     show('Approval queued')
     startPolling()
   } catch (e) {
     show(e instanceof ApiError ? e.detail : 'Could not approve', 'error')
-    if (e instanceof ApiError && e.status === 409) loadRun()
+    if (id === runId.value && e instanceof ApiError && e.status === 409) loadRun()
   } finally {
-    busy.value = false
+    if (id === runId.value) busy.value = false
   }
 }
 
 async function doReject() {
   confirm.value = null
   busy.value = true
+  const id = runId.value
   try {
-    await apiSend('POST', `/api/runs/${runId.value}/reject`)
+    await apiSend('POST', `/api/runs/${id}/reject`)
     show('Run rejected')
+    if (id !== runId.value) return
     await loadRun()
     page.value = 1
     loadChanges()
   } catch (e) {
     show(e instanceof ApiError ? e.detail : 'Could not reject', 'error')
-    if (e instanceof ApiError && e.status === 409) loadRun()
+    if (id === runId.value && e instanceof ApiError && e.status === 409) loadRun()
   } finally {
-    busy.value = false
+    if (id === runId.value) busy.value = false
   }
 }
 
 function applyFilters() { page.value = 1; loadChanges() }
 function setPage(p: number) { page.value = p; loadChanges() }
 
-watch(runId, () => { stopPolling(); page.value = 1; loadAll() })
+function resetState() {
+  stopPolling()
+  runSeq++
+  changesSeq++
+  run.value = null
+  attribution.value = null
+  loadError.value = null
+  notFound.value = false
+  changes.value = []
+  changesTotal.value = 0
+  changesError.value = null
+  changesLoading.value = false
+  pollNote.value = null
+  pollFailures = 0
+  confirm.value = null
+  busy.value = false
+  page.value = 1
+  fType.value = ''
+  fIndicator.value = ''
+  fCountry.value = ''
+}
+
+watch(runId, (id) => { if (Number.isFinite(id)) { resetState(); loadAll() } })
 onMounted(loadAll)
 onBeforeUnmount(stopPolling)
 </script>
@@ -255,7 +314,7 @@ onBeforeUnmount(stopPolling)
               <div v-for="(l, i) in row.excerpt.removed" :key="`r${i}`" class="ln rem">− {{ l }}</div>
               <span v-if="!row.excerpt.added.length && !row.excerpt.removed.length" class="muted">No text excerpt</span>
             </div>
-            <span v-else class="vals"><span class="old">{{ row.old ?? '—' }}</span> → <span>{{ row.new ?? '—' }}</span></span>
+            <span v-else class="vals"><span class="old" :title="row.old ?? undefined">{{ fmtValue(row.old) }}</span> → <span :title="row.new ?? undefined">{{ fmtValue(row.new) }}</span></span>
           </template>
         </DataTable>
         <Pager :page="page" :page-size="PAGE_SIZE" :total="changesTotal" @update:page="setPage" />
