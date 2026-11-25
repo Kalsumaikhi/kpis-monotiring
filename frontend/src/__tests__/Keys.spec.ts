@@ -59,11 +59,36 @@ describe('KeysCard', () => {
 
   it('never renders a secret anywhere in the card', async () => {
     const SENTINEL = 'sentinel-s3cr3t-value'
-    const w = await card([key(), key({ id: 2, name: 'Q', kind: 'query', header_name: null, prefix: null, param_name: 'k' })])
+    // Simulate a server leak: the card must only render known fields.
+    const w = await card([key({ secret: SENTINEL, secret_enc: SENTINEL }), key({ id: 2, name: 'Q', kind: 'query', header_name: null, prefix: null, param_name: 'k', secret: SENTINEL })])
+    expect(w.text()).toContain('Acme token')
     expect(w.html()).not.toContain(SENTINEL)
     expect(w.html()).not.toMatch(/secret"\s*:/)
-    expect(w.text()).not.toContain(SENTINEL)
-    expect(w.findAll('input[type=password]')).toHaveLength(0) // no secret input until a form is opened
+    expect(w.findAll('input[type=password]')).toHaveLength(0)
+    w.unmount()
+  })
+
+  it('unavailable follows the latest status on every load', async () => {
+    const statuses: (() => Promise<unknown>)[] = [
+      () => Promise.reject(new ApiError(500, 'boom')),
+      () => Promise.resolve({ configured: false }),
+      () => Promise.resolve({ configured: true }),
+    ]
+    apiGet.mockImplementation((p: string) => (p === '/api/credentials/status' ? statuses.shift()!() : Promise.resolve([key()])))
+    apiSend.mockResolvedValue({})
+    const w = mount(KeysCard, { attachTo: document.body })
+    await flushPromises()
+    expect(w.find('[data-test=setup-panel]').exists()).toBe(false)
+    expect(w.get('[data-test=add-key]').attributes('disabled')).toBeUndefined()
+    const reload = async () => {
+      await w.get('[data-test=edit-1]').trigger('click')
+      await w.get('form').trigger('submit')
+      await flushPromises()
+    }
+    await reload()
+    expect(w.find('[data-test=setup-panel]').exists()).toBe(true)
+    await reload()
+    expect(w.find('[data-test=setup-panel]').exists()).toBe(false)
     w.unmount()
   })
 

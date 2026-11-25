@@ -23,12 +23,13 @@ const NO_KEY_PANEL = "Keys are encrypted with KPI_SECRET_KEY, which isn't set. A
 async function load() {
   loading.value = true
   error.value = null
-  unavailable.value = false // neutral unless the status says otherwise
   try {
     try {
       const st = await apiGet<{ configured?: boolean }>('/api/credentials/status')
       unavailable.value = st?.configured === false
-    } catch { /* unknown: the server still answers 503 on a write */ }
+    } catch {
+      unavailable.value = false // unknown: neutral; the server still answers 503 on a write
+    }
     const res = await apiGet<StoredKey[]>('/api/credentials')
     keys.value = Array.isArray(res) ? res : []
   } catch (e) {
