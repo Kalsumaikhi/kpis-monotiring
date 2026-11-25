@@ -58,7 +58,20 @@ def _entry(t: dict, status: str, ctype: str = "", error: str | None = None, **ex
             "needs_baseline": t.get("needs_baseline", False), "status": status, "content_type": ctype, "error": error, **extra}
 
 
-def _process(t: dict, res) -> dict:
+def _scrub(data: Any, cred: creds.Credential | None) -> Any:
+    """Redact the secret from every string (keys too) of parsed JSON."""
+    if cred is None:
+        return data
+    if isinstance(data, str):
+        return creds.redact(data, cred)
+    if isinstance(data, list):
+        return [_scrub(v, cred) for v in data]
+    if isinstance(data, dict):
+        return {_scrub(k, cred): _scrub(v, cred) for k, v in data.items()}
+    return data
+
+
+def _process(t: dict, res, cred: creds.Credential | None = None) -> dict:
     if res.status != "ok":
         return _entry(t, res.status, res.content_type, res.error)
     ctype = res.content_type
@@ -67,7 +80,9 @@ def _process(t: dict, res) -> dict:
         kind = "api" if "json" in ctype.lower() else "page"
     if kind == "api":
         try:
-            data = json.loads(_decode(res.body, ctype))
+            # fetch_target already scrubbed the body; scrub the decoded strings again in case
+            # an escape the byte-level pass did not know (e.g. \uXXXX) spelled the secret.
+            data = _scrub(json.loads(_decode(res.body, ctype)), cred)
             flatten_json(data)  # deep nesting would blow up later in parse
         except (ValueError, RecursionError):
             return _entry(t, "error", ctype, "invalid JSON")
@@ -78,6 +93,7 @@ def _process(t: dict, res) -> dict:
     text, err = extract_page(_decode(res.body, ctype), t["selector"])
     if err:
         return _entry(t, "error", ctype, err)
+    text = creds.redact(text, cred)  # HTML entities may have spelled the secret
     return _entry(t, "ok", ctype, kind="page", text=text, sha256=_sha256(text.encode("utf-8")))
 
 
@@ -132,7 +148,7 @@ class WatchConnector:
                 res = fetch_target(client, t["url"], t["use_browser"], state, credential=key)
                 if res.status == "key_rejected":
                     key_errors[cid] = res.error
-                results.append(_process(t, res))
+                results.append(_process(t, res, key))
             except Exception as e:  # noqa: BLE001 - one bad target must not fail the download
                 log.error("watch target %s failed unexpectedly: %s", t["id"], type(e).__name__)
                 results.append(_entry(t, "error", error=f"unexpected error: {type(e).__name__}"))

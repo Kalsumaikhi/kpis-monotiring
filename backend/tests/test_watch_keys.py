@@ -227,6 +227,29 @@ def test_response_body_echoing_key_is_scrubbed():
 
 
 @respx.mock
+def test_json_escaped_echo_is_scrubbed():
+    robots()
+    respx.get("https://a.com/x").mock(return_value=httpx.Response(
+        200, content=b'{"echo":"S3cr\\/et+k","u":"S3cr\\u002fet+k"}',
+        headers={"content-type": "application/json"}))
+    c = cred_obj(secret="S3cr/et+k")
+    res = fetch("https://a.com/x", c)
+    assert b"S3cr" not in res.body.replace(b"S3cr\\u002fet+k", b"") and b"***" in res.body
+    from app.connectors.watch.connector import _process
+    out = _process({"id": 1, "kpi_name": "K", "url": "u", "kind": "api", "selector": None},
+                   res, c)
+    assert out["status"] == "ok" and "S3cr" not in json.dumps(out) and out["json"]["echo"] == "***"
+    assert out["json"]["u"] == "***"
+
+
+def test_redact_json_escaped_forms():
+    c = cred_obj(secret='a/b"c\\d')
+    assert creds.redact(json.dumps({"k": 'a/b"c\\d'}), c) == '{"k": "***"}'
+    assert creds.redact('{"k": "a\\/b\\"c\\\\d"}', c) == '{"k": "***"}'
+    assert creds.redact_bytes(b'{"k":"a\\/b\\"c\\\\d"}', c) == b'{"k":"***"}'
+
+
+@respx.mock
 def test_keyed_request_not_logged(caplog):
     robots()
     respx.get(url__startswith="https://a.com/x").mock(return_value=httpx.Response(200, text="ok"))

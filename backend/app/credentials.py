@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import binascii
 import hashlib
+import json
 import re
 from dataclasses import dataclass, field
 from urllib.parse import (
@@ -142,7 +143,9 @@ def _forms(cred: Credential) -> list[str]:
         values.append(_basic_token(cred))
     forms = set()
     for v in values:
-        forms |= {v, quote_plus(v), quote(v, safe=""), quote(v)}
+        js = json.dumps(v)[1:-1]  # as it appears inside a JSON string
+        forms |= {v, quote_plus(v), quote(v, safe=""), quote(v), js, js.replace("/", "\\/"),
+                  json.dumps(v, ensure_ascii=False)[1:-1]}
     return sorted(forms, key=len, reverse=True)
 
 
