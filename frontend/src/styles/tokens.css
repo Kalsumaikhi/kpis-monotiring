@@ -32,6 +32,16 @@
  *   nav-text/nav-bg    11.77    #BFD6C8 on #031A14
  *   nav-active/nav-bg  11.25    #05EA7D on #031A14
  */
+/*
+ * Chart series (--series-1..6), validated with the dataviz validate_palette.js (light on #ffffff, dark on #0a3022).
+ * Series 1 is Mid Green. Brand tints (Dark Green, Spring Green, lighter greens) cannot give six distinguishable
+ * series: Dark Green and Spring Green fall outside the lightness band and tints of one hue collapse under
+ * colour-vision-deficiency simulation, so slots 2-6 extend the palette with blue, magenta, olive, violet and
+ * teal. Amber and red are never used: they mean "altered" and "removed" (--chg-*). Each slot also has its own
+ * dash pattern in SeriesChart.vue. Results:
+ *   light  #00874f #2b6cd0 #a8479a #6b8e23 #7b4fd6 #0e9aa7  all pass (adjacent CVD worst 9.2, normal-vision worst 20.0)
+ *   dark   #00874f #3b82e0 #c060b0 #8aa832 #9b6bf0 #12a8b8  all pass (adjacent CVD worst 7.8 = WARN band, legal with dashes + legend)
+ */
 :root {
   --c-dark-green: #063b2b;
   --c-spring-green: #05ea7d;
@@ -62,10 +72,10 @@
   --shadow: 0 1px 2px rgba(6, 59, 43, 0.08);
   --series-1: var(--c-mid-green);
   --series-2: #2b6cd0;
-  --series-3: #c27a00;
-  --series-4: #7b4fd6;
-  --series-5: #0e9aa7;
-  --series-6: #b8434f;
+  --series-3: #a8479a;
+  --series-4: #6b8e23;
+  --series-5: #7b4fd6;
+  --series-6: #0e9aa7;
   --overlay: rgba(4, 33, 26, 0.55);
 }
 
@@ -99,10 +109,10 @@
     --shadow: none;
     --series-1: var(--c-mid-green);
     --series-2: #3b82e0;
-    --series-3: #d98a00;
-    --series-4: #9b6bf0;
-    --series-5: #12a8b8;
-    --series-6: #e0566a;
+    --series-3: #c060b0;
+    --series-4: #8aa832;
+    --series-5: #9b6bf0;
+    --series-6: #12a8b8;
     --overlay: rgba(0, 0, 0, 0.6);
   }
 }
@@ -136,9 +146,9 @@
   --shadow: none;
   --series-1: var(--c-mid-green);
   --series-2: #3b82e0;
-  --series-3: #d98a00;
-  --series-4: #9b6bf0;
-  --series-5: #12a8b8;
-  --series-6: #e0566a;
+  --series-3: #c060b0;
+  --series-4: #8aa832;
+  --series-5: #9b6bf0;
+  --series-6: #12a8b8;
   --overlay: rgba(0, 0, 0, 0.6);
 }
