@@ -229,7 +229,7 @@ def test_parse_emits_single_incomplete_summary(tmp_path):
 
 
 @respx.mock
-def test_partial_failure_surfaces_end_to_end(wenv, db_session, client_factory=None):
+def test_partial_failure_surfaces_end_to_end(wenv, db_session, monkeypatch):
     from fastapi.testclient import TestClient
     from app.api import deps
     from app.api.main import create_app
@@ -255,7 +255,7 @@ def test_partial_failure_surfaces_end_to_end(wenv, db_session, client_factory=No
     assert rec.calls == ["1 KPI(s) not checked: Other (error: HTTP 500)"]
     pipeline.run_source(sf, "custom-x", notifier=rec)  # still incomplete: no second note
     assert rec.calls[-1] is None
-    get_settings().dashboard_password = "secret"
+    monkeypatch.setattr(get_settings(), "dashboard_password", "secret")
     app = create_app()
     app.dependency_overrides[deps.get_session] = lambda: db_session
     c = TestClient(app)
