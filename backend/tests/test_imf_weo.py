@@ -155,3 +155,17 @@ def test_429_then_200_succeeds_and_honours_retry_after(tmp_path, monkeypatch):
     ImfWeo().download(httpx.Client(), dest)
     assert json.loads(dest.read_text())["failed"] == []
     assert 30.0 in sleeps and max(sleeps) == 30.0
+
+
+@pytest.mark.parametrize("payload", [{}, {"values": {}}, {"values": {"X": {}}}, {"values": {"Z": {"FRA": {"2000": 1}}}}])
+def test_empty_payload_for_listed_indicator_is_failed(tmp_path, payload):
+    raw = tmp_path / "r.json"
+    raw.write_text(json.dumps({
+        "indicators": {"X": {"label": "x", "dataset": "WEO", "source": "S"}},
+        "data": {"X": payload},
+        "failed": [],
+    }))
+    res = ImfWeo().parse(raw)
+    assert res.complete is False
+    assert res.warnings == ["incomplete: 1 indicators failed: X"]
+    assert list(res.rows) == []

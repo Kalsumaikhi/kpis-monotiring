@@ -5,8 +5,10 @@ Verified 2026-11-24 against the live API:
   {"indicators": {CODE: {"label", "description", "source", "unit", "dataset", "last-modified"}}}
   (132 indicators across datasets WEO, AFRREO, CF, CL, SPRLU, GDD, FPP, FM, ...). Fields can be
   null/empty and a blank code key can occur; blank codes are skipped.
-- GET .../api/v1/{CODE} returns {"values": {CODE: {ISO3: {"1980": 2.5, ...}}}}. "values" can be
-  missing for an indicator; that is treated as zero rows, not a failure. Null values are skipped.
+- GET .../api/v1/{CODE} returns {"values": {CODE: {ISO3: {"1980": 2.5, ...}}}}. "values" (or
+  values[code]) can be missing or empty on a 200; since a listed indicator should have data, that
+  is treated as a failed indicator (transient empty responses must not read as mass removals).
+  Null values are skipped.
 - Country keys include aggregates (regions/groups); kept as-is.
 - `source` looks like "World Economic Outlook (October 2026)" and is the only release label the
   API reports.
@@ -107,7 +109,13 @@ class ImfWeo:
         doc = json.loads(raw.read_text())
         indicators: dict = doc["indicators"]
         data: dict = doc["data"]
-        failed = doc.get("failed") or []
+        failed = list(doc.get("failed") or [])
+        for code in indicators:
+            if not code or not code.strip() or code in failed:
+                continue
+            by_country = (((data.get(code) or {}).get("values") or {}).get(code))
+            if not by_country:
+                failed.append(code)
         metas = [
             IndicatorMeta(
                 code=code,

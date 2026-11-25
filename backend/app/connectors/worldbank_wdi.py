@@ -32,7 +32,7 @@ DATA_FILE = "WDICSV.csv"
 SERIES_FILE = "WDISeries.csv"
 ID_COLS = ["Country Name", "Country Code", "Indicator Name", "Indicator Code"]
 SERIES_COLS = ["Series Code", "Indicator Name"]
-CHUNKSIZE = 50_000
+CHUNKSIZE = 5_000
 
 
 def _clean(v) -> str | None:
