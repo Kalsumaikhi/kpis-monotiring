@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
-import { ApiError, apiSend } from '../../api/client'
-import type { TargetIn, TargetPatch, TestLinkResult, WatchKind, WatchTarget } from '../../api/types'
+import { ApiError, apiGet, apiSend } from '../../api/client'
+import type { StoredKey, TargetIn, TargetPatch, TestLinkResult, WatchKind, WatchTarget } from '../../api/types'
 
 const props = defineProps<{ sourceNames: string[]; target?: WatchTarget | null; sourceName?: string; openAdvanced?: boolean }>()
 const emit = defineEmits<{ saved: []; cancel: [] }>()
@@ -14,6 +14,8 @@ const selector = ref(props.target?.selector ?? '')
 const kind = ref<WatchKind>(props.target?.kind ?? 'auto')
 const useBrowser = ref(props.target?.use_browser ?? false)
 const advanced = ref(!!props.openAdvanced || !!props.target?.selector || props.target?.kind === 'api' || !!props.target?.use_browser)
+const credentialId = ref<number | null>(props.target?.credential_id ?? null)
+const keys = ref<StoredKey[]>([])
 const saving = ref(false)
 const saveError = ref('')
 const testing = ref(false)
@@ -22,16 +24,33 @@ const testError = ref('')
 const first = ref<HTMLInputElement | null>(null)
 
 const urlOk = computed(() => /^https?:\/\/[^\s/]+\S*$/i.test(url.value.trim()))
-const valid = computed(() => source.value.trim() !== '' && kpi.value.trim() !== '' && urlOk.value)
+// The server enforces these too; blocking here saves a round trip.
+const keyProblem = computed(() => {
+  if (credentialId.value === null) return ''
+  if (/^http:\/\//i.test(url.value.trim())) return 'keys can only be sent over https'
+  if (useBrowser.value) return 'keys can\'t be used with "Needs a browser" yet'
+  return ''
+})
+const valid = computed(() => source.value.trim() !== '' && kpi.value.trim() !== '' && urlOk.value && !keyProblem.value)
 const urlTouched = ref(false)
 
-const initial = JSON.stringify([source.value, kpi.value, url.value, selector.value, kind.value, useBrowser.value])
-const dirty = computed(() => JSON.stringify([source.value, kpi.value, url.value, selector.value, kind.value, useBrowser.value]) !== initial)
+const initial = JSON.stringify([source.value, kpi.value, url.value, selector.value, kind.value, useBrowser.value, credentialId.value])
+const dirty = computed(() => JSON.stringify([source.value, kpi.value, url.value, selector.value, kind.value, useBrowser.value, credentialId.value]) !== initial)
 defineExpose({ dirty })
 // Any change to what is tested makes an old preview misleading.
-watch([url, selector, kind, useBrowser], () => { testResult.value = null; testError.value = '' })
+watch([url, selector, kind, useBrowser, credentialId], () => { testResult.value = null; testError.value = '' })
+
+async function loadKeys() {
+  try {
+    const res = await apiGet<StoredKey[]>('/api/credentials')
+    keys.value = Array.isArray(res) ? res.filter((k) => k && typeof k === 'object' && 'has_secret' in k) : []
+  } catch {
+    keys.value = [] // the Key select just offers "None"
+  }
+}
 
 onMounted(async () => {
+  void loadKeys()
   await nextTick()
   if (props.openAdvanced) document.getElementById('tf-selector')?.focus()
   else first.value?.focus()
@@ -42,6 +61,7 @@ function extras() {
     kind: kind.value,
     selector: selector.value.trim() || null,
     use_browser: useBrowser.value,
+    credential_id: credentialId.value,
   }
 }
 
@@ -112,6 +132,15 @@ const jsonRows = computed(() => (testResult.value?.json_preview ?? []).map((r) =
         <button type="button" class="btn secondary" data-test="test-link" :disabled="testing || !urlOk" @click="testLink">{{ testing ? 'Testing…' : 'Test link' }}</button>
       </div>
       <span id="tf-url-err" class="error-text small">{{ urlTouched && url && !urlOk ? 'Enter a link starting with http:// or https://' : '' }}</span>
+    </div>
+
+    <div class="field">
+      <label for="tf-key">Key</label>
+      <select id="tf-key" v-model="credentialId" data-test="key-select" :aria-invalid="keyProblem ? 'true' : 'false'" aria-describedby="tf-key-hint">
+        <option :value="null">None</option>
+        <option v-for="k in keys" :key="k.id" :value="k.id">{{ k.name }}</option>
+      </select>
+      <span id="tf-key-hint" class="hint" :class="keyProblem ? 'error-text' : 'muted'" :role="keyProblem ? 'alert' : undefined" data-test="key-problem">{{ keyProblem || 'Optional. Send a stored key (API token or login) with this link. Manage keys in Settings → Keys.' }}</span>
     </div>
 
     <div v-if="testError" class="error-text" role="alert">{{ testError }}</div>

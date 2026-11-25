@@ -134,7 +134,7 @@ describe('ImportDialog', () => {
       r.onload = () => res(String(r.result))
       r.readAsText(blob!)
     })
-    expect(text.split(/\r?\n/)[0]).toBe('Source name,KPI name,Link')
+    expect(text.split(/\r?\n/)[0]).toBe('Source name,KPI name,Link,Key name')
     click.mockRestore()
     w.unmount()
   })

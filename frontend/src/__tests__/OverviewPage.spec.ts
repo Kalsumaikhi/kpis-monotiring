@@ -18,7 +18,8 @@ function src(over: Partial<Source>): Source {
     slug: 's', name: 'S', area: 'Macro', access: 'api', enabled: true, cron: null,
     last_run: { id: 1, status: 'ok', finished_at: '2026-11-20T10:00:00Z', added: 0, altered: 0, removed: 0 },
     last_change_at: '2026-11-19T10:00:00Z', rows_tracked: 1234567, changes_30d: 5, failing_streak: 0,
-    attribution: null, incomplete: false, noisy_targets: 0, last_success_at: '2026-11-20T10:00:00Z', ...over,
+    attribution: null, incomplete: false, noisy_targets: 0, last_success_at: '2026-11-20T10:00:00Z',
+    credential_id: null, credential_name: null, credential_supported: false, ...over,
   }
 }
 

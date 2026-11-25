@@ -6,7 +6,7 @@ const labels: Record<string, string> = {
   ok: 'OK', baseline: 'Baseline', no_change: 'No change', failed: 'Failed',
   suspect_pending: 'Needs review', approve_queued: 'Applying…', rejected: 'Rejected',
   superseded: 'Superseded', running: 'Running', queued: 'Queued', blocked: 'Blocked',
-  never: 'Not checked yet', error: 'Error',
+  never: 'Not checked yet', error: 'Error', key_rejected: 'Key rejected',
 }
 
 describe('StatusBadge', () => {
