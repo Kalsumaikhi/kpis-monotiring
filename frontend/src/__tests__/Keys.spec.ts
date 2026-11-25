@@ -63,7 +63,6 @@ describe('KeysCard', () => {
     await w.get('[data-test=add-key]').trigger('click')
     await w.get('#kf-name').setValue('New')
     const input = w.get('#kf-secret')
-    const secretEl = input.element as HTMLInputElement
     expect(input.attributes('type')).toBe('password')
     expect(input.attributes('autocomplete')).toBe('new-password')
     await input.setValue('s3cr3t')
@@ -73,7 +72,18 @@ describe('KeysCard', () => {
     await flushPromises()
     expect(apiSend).toHaveBeenCalledWith('POST', '/api/credentials', expect.objectContaining({ name: 'New', kind: 'header', secret: 's3cr3t' }))
     expect(apiSend.mock.calls[0][1]).not.toContain('s3cr3t')
-    expect(secretEl.value).toBe('')
+    w.unmount()
+  })
+
+  it('form input is empty after a successful save', async () => {
+    apiSend.mockResolvedValue({})
+    const w = mount(KeyForm, { attachTo: document.body })
+    await w.get('#kf-name').setValue('N')
+    await w.get('#kf-secret').setValue('s3cr3t')
+    await w.get('form').trigger('submit')
+    await flushPromises()
+    expect(w.emitted('saved')).toBeTruthy()
+    expect((w.get('#kf-secret').element as HTMLInputElement).value).toBe('')
     w.unmount()
   })
 
