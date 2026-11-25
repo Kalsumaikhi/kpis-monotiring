@@ -52,7 +52,12 @@ function handleUnauthorized(): void {
 }
 
 async function request<T>(url: string, init: RequestInit & { headers: Record<string, string> }): Promise<T> {
-  const res = await fetch(url, { ...init, headers: { ...authHeader(), ...init.headers } })
+  let res: Response
+  try {
+    res = await fetch(url, { ...init, headers: { ...authHeader(), ...init.headers } })
+  } catch {
+    throw new ApiError(0, 'Network error — check your connection')
+  }
   if (res.status === 401) {
     handleUnauthorized()
     throw new ApiError(401, 'Password incorrect or expired')

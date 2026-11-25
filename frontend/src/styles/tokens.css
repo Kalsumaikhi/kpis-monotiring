@@ -11,19 +11,21 @@
  *   text/surface       12.59
  *   text-muted/surface  7.07    #3F5F52  (6.12 on --bg)
  *   accent/surface      4.59    #00874F  (white on --btn-bg is also 4.59)
+ *   link/bg             5.73    #006B3F  (--link: links and secondary buttons; use --accent only for fills)
+ *   link/surface        6.61
  *   status-ok/surface   4.59    #00874F
  *   status-warn/surface 6.33    #8A5300  (amber, dark enough for text)
  *   status-fail/surface 6.54    #B3261E
  *   nav-text/nav-bg     9.36    #CFE3D6 on #063B2B
  *   nav-active/nav-bg   7.84    #05EA7D on #063B2B
- *   Note: Mid Green on the Light Green page tint is only 3.97, so accent text is used on
- *   --surface (cards, tables, forms) and page-level text on --bg uses --text / --text-muted.
+ *   Note: Mid Green on the Light Green page tint is only 3.97, so text-coloured links use --link.
  *
  * DARK    (--bg #04211A, --surface #0A3022; surfaces derived from Dark Green)
  *   text/bg            14.69    #E8F2DD
  *   text/surface       12.46
  *   text-muted/surface  7.71    #A9C4B5
  *   accent/surface      8.96    #05EA7D
+ *   link/bg            10.56    #05EA7D  (link/surface 8.96)
  *   status-ok/surface   7.69    #3FD68E
  *   status-warn/surface 7.74    #F2B340
  *   status-fail/surface 6.31    #FF8A80
@@ -43,6 +45,7 @@
   --text-muted: #3f5f52;
   --border: #c5d7bd;
   --accent: #00874f;
+  --link: #006b3f;
   --btn-bg: #00874f;
   --btn-text: #ffffff;
   --nav-bg: #063b2b;
@@ -69,6 +72,7 @@
     --text-muted: #a9c4b5;
     --border: #1d5240;
     --accent: #05ea7d;
+    --link: #05ea7d;
     --btn-bg: #00874f;
     --btn-text: #ffffff;
     --nav-bg: #031a14;
@@ -95,6 +99,7 @@
   --text-muted: #a9c4b5;
   --border: #1d5240;
   --accent: #05ea7d;
+  --link: #05ea7d;
   --btn-bg: #00874f;
   --btn-text: #ffffff;
   --nav-bg: #031a14;

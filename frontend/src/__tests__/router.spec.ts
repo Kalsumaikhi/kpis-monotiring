@@ -19,6 +19,14 @@ describe('router', () => {
     expect(router.currentRoute.value.path).toBe('/kpis')
   })
 
+  it('sends an authenticated visit to /login on to next, or /', async () => {
+    setPassword('p')
+    await router.push('/login?next=/changes')
+    expect(router.currentRoute.value.path).toBe('/changes')
+    await router.push('/login')
+    expect(router.currentRoute.value.path).toBe('/')
+  })
+
   it('declares every route in the brief', () => {
     const paths = router.getRoutes().map((r) => r.path)
     for (const p of ['/login', '/', '/changes', '/runs/:id', '/explorer/:slug?/:indicator?/:country?', '/kpis', '/uploads', '/settings'])

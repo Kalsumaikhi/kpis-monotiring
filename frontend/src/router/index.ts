@@ -22,7 +22,13 @@ const router = createRouter({
 })
 
 router.beforeEach((to) => {
-  if (to.meta.public) return true
+  if (to.meta.public) {
+    if (to.path === '/login' && hasPassword()) {
+      const n = Array.isArray(to.query.next) ? to.query.next[0] : to.query.next
+      return typeof n === 'string' && n.startsWith('/') && !n.startsWith('//') && !n.startsWith('/login') ? n : '/'
+    }
+    return true
+  }
   if (hasPassword()) return true
   return { path: '/login', query: { next: to.fullPath }, replace: true }
 })

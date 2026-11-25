@@ -4,7 +4,7 @@ export interface Column {
   label: string
   align?: 'left' | 'right' | 'center'
 }
-defineProps<{ columns: Column[]; rows: Row[]; loading?: boolean; empty?: string }>()
+defineProps<{ columns: Column[]; rows: Row[]; loading?: boolean; empty?: string; rowKey?: string }>()
 </script>
 
 <template>
@@ -23,7 +23,7 @@ defineProps<{ columns: Column[]; rows: Row[]; loading?: boolean; empty?: string 
           <td :colspan="columns.length" class="state muted">{{ empty ?? 'Nothing to show yet.' }}</td>
         </tr>
         <template v-else>
-          <tr v-for="(row, i) in rows" :key="i" :class="{ dim: loading }">
+          <tr v-for="(row, i) in rows" :key="rowKey ? row[rowKey] : i" :class="{ dim: loading }">
             <td v-for="c in columns" :key="c.key" :style="{ textAlign: c.align ?? 'left' }">
               <slot :name="`cell-${c.key}`" :row="row" :value="row[c.key]">{{ row[c.key] }}</slot>
             </td>

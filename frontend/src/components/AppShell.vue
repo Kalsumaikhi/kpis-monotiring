@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
 import { clearPassword } from '../api/auth'
 import { setTheme, theme, type ThemeChoice } from '../composables/useTheme'
@@ -7,7 +7,21 @@ import { setTheme, theme, type ThemeChoice } from '../composables/useTheme'
 const route = useRoute()
 const router = useRouter()
 const menuOpen = ref(false)
+const menuBtn = ref<HTMLButtonElement | null>(null)
+const sidebar = ref<HTMLElement | null>(null)
 watch(() => route.fullPath, () => (menuOpen.value = false))
+
+// Drawer a11y: focus moves into it on open and back to the menu button on close.
+watch(menuOpen, async (open, was) => {
+  await nextTick()
+  if (open) sidebar.value?.querySelector<HTMLElement>('nav a')?.focus()
+  else if (was) menuBtn.value?.focus()
+})
+function onKey(e: KeyboardEvent) {
+  if (e.key === 'Escape' && menuOpen.value) menuOpen.value = false
+}
+onMounted(() => document.addEventListener('keydown', onKey))
+onBeforeUnmount(() => document.removeEventListener('keydown', onKey))
 
 const nav = [
   { to: '/', label: 'Overview', icon: 'M3 10.5L10 4l7 6.5V16a1 1 0 01-1 1h-3.5v-4.5h-5V17H4a1 1 0 01-1-1z' },
@@ -37,14 +51,18 @@ function signOut() {
 <template>
   <div class="shell">
     <header class="topbar">
-      <button class="menu-btn" type="button" :aria-expanded="menuOpen" aria-controls="sidebar" @click="menuOpen = !menuOpen">
+      <button ref="menuBtn" class="menu-btn" type="button" :aria-expanded="menuOpen" aria-controls="sidebar" @click="menuOpen = !menuOpen">
         <svg viewBox="0 0 20 20" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" aria-hidden="true"><path d="M3 5h14M3 10h14M3 15h14" /></svg>
         <span class="sr-only">Menu</span>
       </button>
       <span class="brand">KPI Monitor</span>
     </header>
 
-    <aside id="sidebar" class="sidebar" :class="{ open: menuOpen }">
+    <aside id="sidebar" ref="sidebar" class="sidebar" :class="{ open: menuOpen }">
+      <button class="close-btn" type="button" @click="menuOpen = false">
+        <svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" aria-hidden="true"><path d="M5 5l10 10M15 5L5 15" /></svg>
+        <span>Close menu</span>
+      </button>
       <div class="brand desktop-brand">
         <svg viewBox="0 0 32 32" width="26" height="26" aria-hidden="true"><path d="M5 23l7-8 5 4 10-12" fill="none" stroke="var(--nav-active)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" /></svg>
         <span>KPI Monitor</span>
@@ -96,6 +114,7 @@ nav { display: flex; flex-direction: column; gap: 2px; }
 .signout { background: transparent; border: 0; color: var(--nav-text); text-align: left; padding: 6px 10px; font: inherit; cursor: pointer; text-decoration: underline; text-underline-offset: 3px; }
 .content { padding: 24px 28px 48px; min-width: 0; max-width: 1280px; width: 100%; }
 .scrim { display: none; }
+.close-btn { display: none; }
 
 @media (max-width: 800px) {
   .shell { display: block; }
@@ -104,7 +123,8 @@ nav { display: flex; flex-direction: column; gap: 2px; }
   .sidebar { position: fixed; z-index: 30; left: 0; top: 0; bottom: 0; width: min(280px, 85vw); height: auto; transform: translateX(-100%); visibility: hidden; transition: transform 0.18s ease, visibility 0.18s; }
   .sidebar.open { transform: none; visibility: visible; }
   .desktop-brand { display: none; }
-  .sidebar nav { margin-top: 36px; }
+  .close-btn { display: inline-flex; align-items: center; gap: 8px; align-self: flex-start; background: transparent; border: 1px solid rgba(255, 255, 255, 0.3); color: #fff; border-radius: var(--radius); padding: 6px 10px; min-height: 36px; font: inherit; cursor: pointer; }
+  .close-btn:focus-visible { outline: 2px solid var(--nav-active); outline-offset: 2px; }
   .scrim { display: block; position: fixed; inset: 0; background: var(--overlay); z-index: 25; }
   .content { padding: 16px 16px 40px; }
 }

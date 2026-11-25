@@ -44,4 +44,13 @@ describe('api client', () => {
     expect(err.status).toBe(409)
     expect(err.detail).toBe('source already has a queued or running run')
   })
+
+  it('wraps a network failure in ApiError(0)', async () => {
+    setPassword('p')
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('Failed to fetch')))
+    const err = (await apiGet('/api/sources').catch((e) => e)) as ApiError
+    expect(err).toBeInstanceOf(ApiError)
+    expect(err.status).toBe(0)
+    expect(err.detail).toBe('Network error — check your connection')
+  })
 })
