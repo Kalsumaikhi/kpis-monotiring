@@ -17,6 +17,7 @@ from typing import Any, Callable
 import httpx
 from sqlalchemy import delete, select
 
+from app import credentials as creds
 from app.config import get_settings
 from app.connectors.base import IndicatorMeta, ParseResult
 from app.connectors.watch.extract import extract_page, flatten_json
@@ -53,6 +54,7 @@ def _decode(body: bytes, ctype: str) -> str:
 
 def _entry(t: dict, status: str, ctype: str = "", error: str | None = None, **extra) -> dict:
     return {"id": t["id"], "kpi_name": t["kpi_name"], "url": t["url"], "kind": t["kind"],
+            "credential_id": t.get("credential_id"),
             "needs_baseline": t.get("needs_baseline", False), "status": status, "content_type": ctype, "error": error, **extra}
 
 
@@ -99,24 +101,51 @@ class WatchConnector:
             targets = [
                 {"id": t.id, "kpi_name": t.kpi_name, "url": t.url, "kind": t.kind,
                  "selector": t.selector, "use_browser": t.use_browser,
-                 "needs_baseline": t.needs_baseline}
+                 "needs_baseline": t.needs_baseline, "credential_id": t.credential_id}
                 for t in session.scalars(
                     select(WatchTarget)
                     .where(WatchTarget.source_id == self.source_id, WatchTarget.enabled.is_(True))
                     .order_by(WatchTarget.id)
                 )
             ]
+            # Decrypt each key here, before any network I/O; a key that cannot be read fails
+            # only its own targets.
+            keys: dict[int, creds.Credential | str] = {}
+            for cid in {t["credential_id"] for t in targets if t["credential_id"] is not None}:
+                try:
+                    keys[cid] = creds.load(session, cid)
+                except creds.KeyUnavailable as e:
+                    keys[cid] = f"key unavailable ({e})"
+                except KeyError:
+                    keys[cid] = "key unavailable (key not found)"
         state = FetchState()
         results = []
+        key_errors: dict[int, str | None] = {cid: None for cid in keys}
         for t in targets:
+            cid = t["credential_id"]
+            key = keys.get(cid) if cid is not None else None
+            if isinstance(key, str):
+                results.append(_entry(t, "error", error=key))
+                key_errors[cid] = key
+                continue
             try:
-                results.append(_process(t, fetch_target(client, t["url"], t["use_browser"], state)))
+                res = fetch_target(client, t["url"], t["use_browser"], state, credential=key)
+                if res.status == "key_rejected":
+                    key_errors[cid] = res.error
+                results.append(_process(t, res))
             except Exception as e:  # noqa: BLE001 - one bad target must not fail the download
-                log.exception("watch target %s failed unexpectedly", t["id"])
+                log.error("watch target %s failed unexpectedly: %s", t["id"], type(e).__name__)
                 results.append(_entry(t, "error", error=f"unexpected error: {type(e).__name__}"))
         tmp = dest.with_name(dest.name + ".part")
         tmp.write_text(json.dumps({"targets": results}), encoding="utf-8")
         tmp.replace(dest)
+        if keys:  # after the run, in its own session: no row lock held on the key
+            with self.session_factory() as session:
+                for cid, err in key_errors.items():
+                    try:
+                        creds.mark_used(session, cid, err)
+                    except Exception:  # noqa: BLE001 - bookkeeping must not fail the download
+                        log.warning("could not record use of key %s", cid)
 
     def parse(self, raw: Path) -> ParseResult:
         targets = json.loads(Path(raw).read_text(encoding="utf-8"))["targets"]

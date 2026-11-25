@@ -1,4 +1,4 @@
-"""Parse an uploaded Excel/CSV sheet of custom KPIs (Source name, KPI name, Link)."""
+"""Parse an uploaded Excel/CSV sheet of custom KPIs (Source name, KPI name, Link, optional Key name)."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ import re
 import openpyxl
 
 COLUMNS = (("source_name", "Source name"), ("kpi_name", "KPI name"), ("url", "Link"))
+OPTIONAL_COLUMNS = (("key_name", "Key name"),)
 MAX_ROWS = 5000
 
 
@@ -92,7 +93,7 @@ def _csv_rows(data: bytes) -> list[list]:
 
 
 def parse_sheet(filename: str, data: bytes) -> list[dict]:
-    """Rows as {row, source_name, kpi_name, url}; row is the sheet row (header = 1).
+    """Rows as {row, source_name, kpi_name, url[, key_name]}; row is the sheet row (header = 1).
 
     Blank rows are skipped. Raises SheetError for an unknown type or a missing column.
     """
@@ -112,6 +113,9 @@ def parse_sheet(filename: str, data: bytes) -> list[dict]:
         if _norm(label) not in header:
             raise SheetError(f"missing column: {label}")
         index[key] = header.index(_norm(label))
+    for key, label in OPTIONAL_COLUMNS:
+        if _norm(label) in header:
+            index[key] = header.index(_norm(label))
     if len(grid) - 1 > MAX_ROWS:
         raise SheetError(f"too many rows (max {MAX_ROWS})")
     links = _xlsx_link_targets(data, index["url"], len(grid)) if is_xlsx and len(grid) > 1 else {}

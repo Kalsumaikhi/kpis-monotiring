@@ -13,6 +13,7 @@ from urllib.parse import urljoin, urlsplit
 
 import httpx
 
+from app import credentials as creds
 from app.config import get_settings
 
 USER_AGENT = "KPI-Monitor/1.0"
@@ -24,13 +25,16 @@ MIN_INTERVAL = 1.0  # seconds between requests to the same host
 
 @dataclass
 class FetchResult:
-    status: str  # 'ok' | 'blocked' | 'error'
+    status: str  # 'ok' | 'blocked' | 'error' | 'key_rejected'
     content_type: str = ""
     body: bytes = b""
     error: str | None = None
 
 
 log = logging.getLogger(__name__)
+# httpx logs every request URL at INFO, which would include a query-string key.
+for _name in ("httpx", "httpcore"):
+    logging.getLogger(_name).setLevel(logging.WARNING)
 NOT_ALLOWED = "destination not allowed"
 
 
@@ -116,15 +120,19 @@ def _robots(client: httpx.Client, state: FetchState, scheme: str, host: str):
     return state.robots[key]
 
 
-def _fetch_http(client: httpx.Client, url: str) -> FetchResult:
+def _fetch_http(client: httpx.Client, url: str, req_url: str | None = None,
+                headers: dict | None = None, keyed: bool = False) -> FetchResult:
     """One request without following redirects. A redirect comes back as status 'redirect'
-    with the (absolute) target in `error`."""
+    with the (absolute) target in `error`. `req_url`/`headers` carry a key (url is the
+    key-free form used to resolve redirects); `keyed` turns a 401/403 into key_rejected."""
     deadline = time.monotonic() + TIMEOUT
     try:
-        with client.stream("GET", url, headers={"User-Agent": USER_AGENT}, timeout=TIMEOUT,
-                           follow_redirects=False) as r:
+        with client.stream("GET", req_url or url, headers=headers or {"User-Agent": USER_AGENT},
+                           timeout=TIMEOUT, follow_redirects=False) as r:
             if r.is_redirect and r.headers.get("location"):
                 return FetchResult("redirect", error=urljoin(url, r.headers["location"]))
+            if keyed and r.status_code in (401, 403):
+                return FetchResult("key_rejected", error=f"key rejected (HTTP {r.status_code})")
             if r.status_code >= 400:
                 return FetchResult("error", error=f"HTTP {r.status_code}")
             ctype = r.headers.get("content-type", "")
@@ -236,15 +244,43 @@ def _nav_blocked(client: httpx.Client, state: FetchState, url: str) -> bool:
     return robots is not None and not robots.can_fetch(USER_AGENT, url)
 
 
+NEEDS_HTTPS = "keys can only be sent over https"
+NO_BROWSER_KEY = 'keys can\'t be used with "Needs a browser" yet'
+
+
+def _origin(parts) -> tuple[str, int | None]:
+    return (parts.hostname or "").lower(), parts.port
+
+
 def fetch_target(client: httpx.Client, url: str, use_browser: bool = False,
-                 state: FetchState | None = None) -> FetchResult:
+                 state: FetchState | None = None,
+                 credential: creds.Credential | None = None) -> FetchResult:
     """Fetch one URL. `state` is shared across one download so robots.txt is read once per
     host and requests to a host are spaced; without it each call is independent.
 
     Redirects are followed manually (max 5); scheme, destination policy, robots.txt and
     throttling are re-checked on every hop (in browser mode too, for the main-frame
-    navigation; everything else the browser loads is policed by the proxy)."""
-    state = state or FetchState()
+    navigation; everything else the browser loads is policed by the proxy).
+
+    A `credential` is sent only over https and only to the original host (same port) on
+    every hop; a hop elsewhere is fetched without it. Error text and the body are scrubbed
+    of the secret before they leave this function."""
+    res = _fetch_target(client, url, use_browser, state or FetchState(), credential)
+    if credential is not None:
+        if res.error:
+            res.error = creds.redact(res.error, credential)
+        if res.body:
+            res.body = creds.redact_bytes(res.body, credential)
+    return res
+
+
+def _fetch_target(client, url, use_browser, state, credential) -> FetchResult:
+    origin = _origin(urlsplit(url))
+    if credential is not None:
+        if use_browser:
+            return FetchResult("error", error=NO_BROWSER_KEY)
+        if urlsplit(url).scheme != "https":
+            return FetchResult("error", error=NEEDS_HTTPS)
     for hop in range(MAX_REDIRECTS + 1):
         parts = urlsplit(url)
         if parts.scheme not in ("http", "https") or not parts.hostname:
@@ -258,7 +294,13 @@ def fetch_target(client: httpx.Client, url: str, use_browser: bool = False,
         if use_browser:
             res = _fetch_browser(url, lambda u: _nav_blocked(client, state, u))
         else:
-            res = _fetch_http(client, url)
+            keyed = (credential is not None and parts.scheme == "https"
+                     and _origin(parts) == origin)
+            if keyed:
+                req_url, headers = creds.apply(credential, url, {"User-Agent": USER_AGENT})
+                res = _fetch_http(client, url, req_url, headers, keyed=True)
+            else:
+                res = _fetch_http(client, url)
         if res.status != "redirect":
             return res
         url = res.error

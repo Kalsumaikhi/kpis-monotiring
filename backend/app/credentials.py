@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import binascii
 import hashlib
+import re
 from dataclasses import dataclass, field
 from urllib.parse import parse_qsl, quote, quote_plus, urlencode, urlsplit, urlunsplit
 
@@ -91,16 +92,55 @@ def apply(cred: Credential, url: str, headers: dict) -> tuple[str, dict]:
     return url, headers
 
 
+_HEX = "0123456789abcdefABCDEF"
+
+
+def _pattern(form: str) -> str:
+    """Regex for `form` where the hex digits of a %XX escape match in either case."""
+    out, i = [], 0
+    while i < len(form):
+        if form[i] == "%" and len(form) >= i + 3 and all(c in _HEX for c in form[i + 1:i + 3]):
+            out.append("%" + "".join(f"[{c.lower()}{c.upper()}]" if c.isalpha() else c
+                                     for c in form[i + 1:i + 3]))
+            i += 3
+        else:
+            out.append(re.escape(form[i]))
+            i += 1
+    return "".join(out)
+
+
+def _forms(cred: Credential) -> list[str]:
+    """Every spelling of the secret (and for basic auth the Authorization token) to scrub,
+    longest first."""
+    values = [cred.secret] if cred.secret else []
+    if cred.kind == "basic":
+        values.append(_basic_token(cred))
+    forms = set()
+    for v in values:
+        forms |= {v, quote_plus(v), quote(v, safe=""), quote(v)}
+    return sorted(forms, key=len, reverse=True)
+
+
+def _scrubber(cred: Credential, encoding: str | None = None):
+    forms = _forms(cred)
+    if encoding:  # match the UTF-8 bytes of a form as seen through a latin-1 decode
+        forms = [f.encode().decode(encoding) for f in forms]
+    return re.compile("|".join(_pattern(f) for f in forms)) if forms else None
+
+
 def redact(text: str, cred: Credential | None) -> str:
     if cred is None or not text:
         return text
-    if cred.kind == "basic":
-        text = text.replace(_basic_token(cred), "***")
-    if cred.secret:
-        forms = {cred.secret, quote_plus(cred.secret), quote(cred.secret, safe=""), quote(cred.secret)}
-        for form in sorted(forms, key=len, reverse=True):
-            text = text.replace(form, "***")
-    return text
+    rx = _scrubber(cred)
+    return rx.sub("***", text) if rx else text
+
+
+def redact_bytes(data: bytes, cred: Credential | None) -> bytes:
+    """redact() over a response body of unknown charset (matches the UTF-8 form of the secret)."""
+    if cred is None or not data:
+        return data
+    rx = _scrubber(cred, "latin-1")
+    return rx.sub("***", data.decode("latin-1")).encode("latin-1") if rx else data
 
 
 def mark_used(session: Session, credential_id: int, error: str | None) -> None:
