@@ -17,6 +17,8 @@ class Settings(BaseSettings):
     # Comma-separated hostnames/IPs that watch targets may reach even if they resolve to
     # loopback/private/link-local addresses (internal pages). Default empty: public only.
     watch_allowed_hosts: str = ""
+    # Encrypts stored API keys (Fernet key, or any string — derived with SHA-256). Unset: key store off.
+    kpi_secret_key: str | None = None
 
 
 @lru_cache
