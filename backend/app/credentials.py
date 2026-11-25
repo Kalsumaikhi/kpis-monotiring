@@ -10,8 +10,8 @@ from __future__ import annotations
 import base64
 import binascii
 import hashlib
-from dataclasses import dataclass
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from dataclasses import dataclass, field
+from urllib.parse import parse_qsl, quote, quote_plus, urlencode, urlsplit, urlunsplit
 
 from cryptography.fernet import Fernet, InvalidToken
 from sqlalchemy import func, select, update
@@ -25,8 +25,10 @@ class KeyUnavailable(Exception):
     pass
 
 
-def _fernet() -> Fernet:
-    value = Settings().kpi_secret_key
+def get_fernet() -> Fernet:
+    """Build the Fernet for the current KPI_SECRET_KEY (build once per request and pass to decrypt)."""
+    secret = Settings().kpi_secret_key
+    value = secret.get_secret_value() if secret else ""
     if not value:
         raise KeyUnavailable("KPI_SECRET_KEY not set")
     try:
@@ -38,11 +40,11 @@ def _fernet() -> Fernet:
 
 
 def encrypt(secret: str) -> bytes:
-    return _fernet().encrypt(secret.encode())
+    return get_fernet().encrypt(secret.encode())
 
 
-def decrypt(blob: bytes) -> str:
-    f = _fernet()
+def decrypt(blob: bytes, fernet: Fernet | None = None) -> str:
+    f = fernet or get_fernet()
     try:
         return f.decrypt(bytes(blob)).decode()
     except InvalidToken:
@@ -58,7 +60,7 @@ class Credential:
     prefix: str | None
     param_name: str | None
     username: str | None
-    secret: str
+    secret: str = field(repr=False)
 
 
 def load(session: Session, credential_id: int) -> Credential:
@@ -77,7 +79,9 @@ def apply(cred: Credential, url: str, headers: dict) -> tuple[str, dict]:
     headers = dict(headers)
     if cred.kind == "query":
         parts = urlsplit(url)
-        query = parse_qsl(parts.query, keep_blank_values=True) + [(cred.param_name or "", cred.secret)]
+        name = cred.param_name or ""
+        query = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True) if k != name]
+        query.append((name, cred.secret))
         url = urlunsplit(parts._replace(query=urlencode(query)))
     elif cred.kind == "basic":
         headers["Authorization"] = f"Basic {_basic_token(cred)}"
@@ -93,13 +97,18 @@ def redact(text: str, cred: Credential | None) -> str:
     if cred.kind == "basic":
         text = text.replace(_basic_token(cred), "***")
     if cred.secret:
-        text = text.replace(cred.secret, "***")
+        forms = {cred.secret, quote_plus(cred.secret), quote(cred.secret, safe=""), quote(cred.secret)}
+        for form in sorted(forms, key=len, reverse=True):
+            text = text.replace(form, "***")
     return text
 
 
 def mark_used(session: Session, credential_id: int, error: str | None) -> None:
-    session.execute(
-        update(CredentialRow).where(CredentialRow.id == credential_id)
-        .values(last_used_at=func.now(), last_error=error)
-    )
-    session.commit()
+    """Record a use. Runs in its own short session on the same bind, so it never commits the
+    caller's session; updated_at is left untouched (it tracks edits, not use)."""
+    with Session(bind=session.get_bind(), join_transaction_mode="create_savepoint") as s:
+        s.execute(
+            update(CredentialRow).where(CredentialRow.id == credential_id)
+            .values(last_used_at=func.now(), last_error=error, updated_at=CredentialRow.updated_at)
+        )
+        s.commit()

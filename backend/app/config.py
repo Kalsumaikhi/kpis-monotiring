@@ -1,5 +1,6 @@
 from functools import lru_cache
 
+from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -18,7 +19,7 @@ class Settings(BaseSettings):
     # loopback/private/link-local addresses (internal pages). Default empty: public only.
     watch_allowed_hosts: str = ""
     # Encrypts stored API keys (Fernet key, or any string — derived with SHA-256). Unset: key store off.
-    kpi_secret_key: str | None = None
+    kpi_secret_key: SecretStr | None = None
 
 
 @lru_cache

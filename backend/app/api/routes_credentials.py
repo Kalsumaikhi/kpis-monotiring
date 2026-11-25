@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -20,7 +21,9 @@ router = APIRouter()
 
 KeyKind = Literal["header", "query", "basic"]
 NO_KEY = "KPI_SECRET_KEY is not set — see README → Keys"
-REQUIRED = {"header": "header_name", "query": "param_name", "basic": "username"}
+KIND_FIELDS = {"header": ("header_name", "prefix"), "query": ("param_name",), "basic": ("username",)}
+ALL_FIELDS = ("header_name", "prefix", "param_name", "username")
+TOKEN = re.compile(r"^[A-Za-z0-9!#$%&'*+.^_`|~-]{1,64}$")
 
 
 class CredentialIn(BaseModel):
@@ -48,11 +51,32 @@ def _clean(v: str | None) -> str | None:
     return v or None
 
 
-def _validate(name: str | None, kind: str, fields: dict) -> None:
+def _validate(name: str | None, kind: str, fields: dict, secret: str | None) -> dict:
+    """Default and check the fields for `kind`; returns them with fields foreign to the kind nulled."""
     if not (name or "").strip() or len(name.strip()) > 200:
         raise HTTPException(422, "name must be 1-200 characters")
-    if not fields.get(REQUIRED[kind]):
-        raise HTTPException(422, f"{REQUIRED[kind]} is required for a {kind} key")
+    fields = {k: (v if k in KIND_FIELDS[kind] else None) for k, v in fields.items()}
+    if kind == "header":
+        fields["header_name"] = fields["header_name"] or "Authorization"
+    for k in ("header_name", "param_name"):
+        v = fields[k]
+        if kind == "query" and k == "param_name" and not v:
+            raise HTTPException(422, "param_name is required for a query key")
+        if v is not None and not TOKEN.match(v):
+            raise HTTPException(422, f"{k} must be 1-64 letters, digits or token characters")
+    if kind == "basic" and not fields["username"]:
+        raise HTTPException(422, "username is required for a basic key")
+    prefix, user = fields["prefix"], fields["username"]
+    if prefix and (len(prefix) > 32 or re.search(r"[\r\n]", prefix)):
+        raise HTTPException(422, "prefix must be at most 32 characters, no line breaks")
+    if user and (":" in user or len(user) > 256):
+        raise HTTPException(422, "username must be at most 256 characters and not contain ':'")
+    if secret is not None:
+        if not secret or len(secret) > 4096:
+            raise HTTPException(422, "secret must be 1-4096 characters")
+        if kind == "header" and re.search(r"[\r\n]", secret):
+            raise HTTPException(422, "secret must not contain line breaks")
+    return fields
 
 
 def _used_by(session: Session, ids: list[int] | None = None) -> dict[int, dict]:
@@ -76,19 +100,28 @@ def _used_by(session: Session, ids: list[int] | None = None) -> dict[int, dict]:
     return out
 
 
-def _readable(row: Credential) -> bool:
+def _fernet():
     try:
-        creds.decrypt(row.secret_enc)
+        return creds.get_fernet()
+    except creds.KeyUnavailable:
+        return None
+
+
+def _readable(row: Credential, fernet=None) -> bool:
+    if fernet is None:
+        return False
+    try:
+        creds.decrypt(row.secret_enc, fernet)
         return True
     except creds.KeyUnavailable:
         return False
 
 
-def _json(row: Credential, used: dict | None) -> dict:
+def _json(row: Credential, used: dict | None, fernet=None) -> dict:
     return {
         "id": row.id, "name": row.name, "kind": row.kind, "header_name": row.header_name,
         "prefix": row.prefix, "param_name": row.param_name, "username": row.username,
-        "has_secret": True, "readable": _readable(row),
+        "has_secret": True, "readable": _readable(row, fernet),
         "created_at": iso(row.created_at), "updated_at": iso(row.updated_at),
         "last_used_at": iso(row.last_used_at), "last_error": row.last_error,
         "used_by": used or {"targets": [], "sources": []},
@@ -113,15 +146,14 @@ def _get(session: Session, cid: int) -> Credential:
 def list_credentials(session: Session = Depends(get_session)):
     rows = session.scalars(select(Credential).order_by(Credential.name)).all()
     used = _used_by(session)
-    return [_json(r, used.get(r.id)) for r in rows]
+    f = _fernet()
+    return [_json(r, used.get(r.id), f) for r in rows]
 
 
 @router.post("/credentials", status_code=201)
 def create_credential(body: CredentialIn, session: Session = Depends(get_session)):
-    fields = {k: _clean(getattr(body, k)) for k in ("header_name", "prefix", "param_name", "username")}
-    _validate(body.name, body.kind, fields)
-    if not body.secret:
-        raise HTTPException(422, "secret is required")
+    fields = {k: _clean(getattr(body, k)) for k in ALL_FIELDS}
+    fields = _validate(body.name, body.kind, fields, body.secret)
     row = Credential(name=body.name.strip(), kind=body.kind, secret_enc=_encrypt(body.secret), **fields)
     session.add(row)
     try:
@@ -130,7 +162,7 @@ def create_credential(body: CredentialIn, session: Session = Depends(get_session
         session.rollback()
         raise HTTPException(409, "a key with this name already exists") from None
     session.refresh(row)
-    return JSONResponse(_json(row, None), status_code=201)
+    return JSONResponse(_json(row, None, _fernet()), status_code=201)
 
 
 @router.patch("/credentials/{cid}")
@@ -139,15 +171,15 @@ def patch_credential(cid: int, body: CredentialPatch, session: Session = Depends
     data = body.model_dump(exclude_unset=True)
     if "secret" in data and not data["secret"]:
         raise HTTPException(422, "secret must not be empty")
-    for k in ("header_name", "prefix", "param_name", "username"):
+    for k in ALL_FIELDS:
         if k in data:
             data[k] = _clean(data[k])
     name = data.get("name", row.name)
     kind = data.get("kind", row.kind)
-    fields = {k: data.get(k, getattr(row, k)) for k in ("header_name", "prefix", "param_name", "username")}
+    fields = {k: data.get(k, getattr(row, k)) for k in ALL_FIELDS}
     if name is None or kind is None:
         raise HTTPException(422, "name and kind cannot be null")
-    _validate(name, kind, fields)
+    fields = _validate(name, kind, fields, data.get("secret"))
     if "secret" in data:
         row.secret_enc = _encrypt(data["secret"])
     row.name, row.kind = name.strip(), kind
@@ -159,7 +191,7 @@ def patch_credential(cid: int, body: CredentialPatch, session: Session = Depends
         session.rollback()
         raise HTTPException(409, "a key with this name already exists") from None
     session.refresh(row)
-    return _json(row, _used_by(session, [cid]).get(cid))
+    return _json(row, _used_by(session, [cid]).get(cid), _fernet())
 
 
 @router.delete("/credentials/{cid}", status_code=204)

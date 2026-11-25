@@ -57,14 +57,50 @@ def test_secret_encrypted_at_rest(client, db_session):
 
 
 @pytest.mark.parametrize("payload", [
-    {"kind": "header", "header_name": None},
     {"kind": "query"},
+    {"header_name": "bad name"},
+    {"header_name": "x" * 65},
+    {"prefix": "a\nb"},
+    {"prefix": "p" * 33},
+    {"kind": "basic", "username": "a:b"},
+    {"secret": "a\nb"},
+    {"secret": "x" * 4097},
     {"kind": "basic"},
     {"kind": "bogus"},
     {"secret": ""},
 ])
 def test_kind_field_validation(client, payload):
     assert client.post("/api/credentials", json=body(**payload)).status_code == 422
+
+
+def test_header_name_defaults_to_authorization(client):
+    r = client.post("/api/credentials", json=body(header_name=None))
+    assert r.status_code == 201 and r.json()["header_name"] == "Authorization"
+    q = client.post("/api/credentials", json=body(name="q", kind="query", param_name="k")).json()
+    r = client.patch(f"/api/credentials/{q['id']}", json={"kind": "header"})
+    assert r.status_code == 200 and r.json()["header_name"] == "Authorization"
+    assert r.json()["param_name"] is None
+
+
+def test_fields_foreign_to_kind_nulled(client):
+    r = client.post("/api/credentials", json=body(
+        kind="basic", username="u", header_name="X", prefix="P", param_name="p")).json()
+    assert (r["header_name"], r["prefix"], r["param_name"], r["username"]) == (None, None, None, "u")
+    r = client.patch(f"/api/credentials/{r['id']}", json={"kind": "query", "param_name": "k"}).json()
+    assert (r["username"], r["param_name"]) == (None, "k")
+
+
+def test_repr_hides_secret():
+    c = C(secret="topsecret")
+    assert "topsecret" not in repr(c) and "topsecret" not in str(c)
+
+
+def test_mark_used_keeps_updated_at(client, db_session):
+    cid = client.post("/api/credentials", json=body()).json()["id"]
+    before = client.get("/api/credentials").json()[0]["updated_at"]
+    creds.mark_used(db_session, cid, None)
+    after = client.get("/api/credentials").json()[0]
+    assert after["updated_at"] == before and after["last_used_at"]
 
 
 def test_kind_ok_variants(client):
@@ -178,6 +214,8 @@ def test_apply_header_query_basic():
     assert h == {"X-Key": "s"}
     url, h = creds.apply(C(kind="query", param_name="api_key"), "https://e.com/x?a=1", {})
     assert url == "https://e.com/x?a=1&api_key=s" and h == {}
+    url, _ = creds.apply(C(kind="query", param_name="api_key"), "https://e.com/x?api_key=old&a=1", {})
+    assert url == "https://e.com/x?a=1&api_key=s"
     url, _ = creds.apply(C(kind="query", param_name="api_key"), "https://e.com/x", {})
     assert url == "https://e.com/x?api_key=s"
     _, h = creds.apply(C(kind="basic", username="u"), "https://e.com/x", {})
@@ -191,3 +229,11 @@ def test_redact():
     out = creds.redact(f"Authorization: Basic {b64} and s3cr3t", C(kind="basic", username="u", secret="s3cr3t"))
     assert out == "Authorization: Basic *** and ***"
     assert creds.redact("keep", None) == "keep"
+
+
+def test_redact_url_encoded_forms():
+    from urllib.parse import quote, quote_plus
+    sec = "a+b/c=d&e f"
+    c = C(secret=sec)
+    for form in (sec, quote_plus(sec), quote(sec, safe=""), quote(sec)):
+        assert creds.redact(f"x {form} y", c) == "x *** y"
