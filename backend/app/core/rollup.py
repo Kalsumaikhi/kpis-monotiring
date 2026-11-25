@@ -17,15 +17,29 @@ _SELECT = """
 
 
 def refresh_rollup(session: Session, run_id: int) -> None:
-    """Add this run's changes to the per-day counts. Call once per applied run, in its transaction."""
+    """Recompute the full-day counts for every (source, indicator, day) this run touched.
+
+    Idempotent: counts are overwritten from `changes`, so repeating the call changes nothing.
+    """
     session.execute(
         text(
-            "INSERT INTO change_rollup (source_id, indicator, day, added, altered, removed) "
-            + _SELECT.format(where="WHERE run_id = :rid")
-            + " ON CONFLICT (source_id, indicator, day) DO UPDATE SET "
-              "added = change_rollup.added + EXCLUDED.added, "
-              "altered = change_rollup.altered + EXCLUDED.altered, "
-              "removed = change_rollup.removed + EXCLUDED.removed"
+            """
+            WITH touched AS (
+                SELECT DISTINCT source_id, indicator, (created_at AT TIME ZONE 'UTC')::date AS day
+                FROM changes WHERE run_id = :rid
+            )
+            INSERT INTO change_rollup (source_id, indicator, day, added, altered, removed)
+            SELECT c.source_id, c.indicator, t.day,
+                   count(*) FILTER (WHERE c.change_type = 'added'),
+                   count(*) FILTER (WHERE c.change_type = 'altered'),
+                   count(*) FILTER (WHERE c.change_type = 'removed')
+            FROM touched t
+            JOIN changes c ON c.source_id = t.source_id AND c.indicator = t.indicator
+                          AND (c.created_at AT TIME ZONE 'UTC')::date = t.day
+            GROUP BY c.source_id, c.indicator, t.day
+            ON CONFLICT (source_id, indicator, day) DO UPDATE SET
+                added = EXCLUDED.added, altered = EXCLUDED.altered, removed = EXCLUDED.removed
+            """
         ),
         {"rid": run_id},
     )

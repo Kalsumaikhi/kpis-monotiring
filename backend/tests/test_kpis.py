@@ -223,3 +223,71 @@ def test_pipeline_refreshes_rollup(db_session, session_factory, monkeypatch):
         text("SELECT sum(added), sum(altered), sum(removed) FROM change_rollup WHERE source_id=:s"),
         {"s": src.id}).one()
     assert tuple(total) == (1, 1, 0)
+
+
+def test_refresh_rollup_is_idempotent(db_session, source, run):
+    d = _today() - timedelta(days=3)
+    _change(db_session, source, run, day=d, ctype="added")
+    _change(db_session, source, run, day=d, country="BE")
+    rollup.refresh_rollup(db_session, run.id)
+    rollup.refresh_rollup(db_session, run.id)
+    r = db_session.scalars(select(ChangeRollup).where(ChangeRollup.source_id == source.id)).one()
+    assert (r.added, r.altered, r.removed) == (1, 1, 0)
+
+
+def test_refresh_rollup_recomputes_full_day_across_runs(db_session, source, run):
+    d = _today() - timedelta(days=3)
+    run2 = Run(source_id=source.id, status="ok")
+    db_session.add(run2)
+    db_session.flush()
+    _change(db_session, source, run, day=d)
+    rollup.refresh_rollup(db_session, run.id)
+    _change(db_session, source, run2, day=d, country="BE")
+    rollup.refresh_rollup(db_session, run2.id)
+    rollup.refresh_rollup(db_session, run.id)
+    r = db_session.scalars(select(ChangeRollup).where(ChangeRollup.source_id == source.id)).one()
+    assert r.altered == 2
+
+
+def test_approve_run_path_fills_rollup(db_session, session_factory, monkeypatch):
+    from app.connectors import registry
+    from app.core import pipeline
+    from app.core.canonical import RawRow
+    from tests.conftest import FakeConnector
+
+    src = Source(slug="fake", name="Fake", area="test", access="manual")
+    db_session.add(src)
+    db_session.commit()
+    conn = FakeConnector()
+    monkeypatch.setitem(registry.CONNECTORS, "fake", conn)
+    conn.rows = [RawRow("d", "i", f"C{i}", "2020", i) for i in range(10)]
+    pipeline.run_source(session_factory, "fake")
+    conn.rows = conn.rows[:7]
+    held = pipeline.run_source(session_factory, "fake")
+    assert held.status == "suspect_pending"
+    n = db_session.execute(text("SELECT count(*) FROM change_rollup")).scalar()
+    assert n == 0  # held runs record nothing
+    db_session.execute(text("UPDATE runs SET status='approve_queued' WHERE id=:i"), {"i": held.id})
+    db_session.commit()
+    done = pipeline.approve_run(session_factory, held.id)
+    assert done.status == "ok"
+    total = db_session.execute(
+        text("SELECT sum(added), sum(altered), sum(removed) FROM change_rollup WHERE source_id=:s"),
+        {"s": src.id}).one()
+    assert tuple(total) == (0, 0, 3)
+
+
+def test_sparkline_month_buckets_across_year_boundary(client, db_session, source, run, monkeypatch):
+    from app.api import routes_kpis
+    monkeypatch.setattr(routes_kpis, "_today", lambda: date(2026, 2, 10))
+    _ind(db_session, source, "i")
+    _change(db_session, source, run, day=date(2025, 12, 31))   # 3rd from last
+    _change(db_session, source, run, day=date(2026, 1, 1), country="BE")
+    _change(db_session, source, run, day=date(2026, 1, 20), country="CH")
+    _change(db_session, source, run, day=date(2025, 3, 5), country="DE")   # first bucket
+    _change(db_session, source, run, day=date(2025, 2, 28), country="FR")  # outside window
+    rollup.backfill(db_session)
+    it = client.get("/api/kpis").json()["items"][0]
+    # window: Mar 2025 .. Feb 2026
+    assert it["sparkline"] == [1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 0]
+    assert it["changes_12m"] == 4

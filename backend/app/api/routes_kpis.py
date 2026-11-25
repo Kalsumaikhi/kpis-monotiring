@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timezone
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -40,6 +40,10 @@ def _source_id_or_404(session: Session, slug: str) -> int:
 
 def attribution_for(slug: str) -> str | None:
     return getattr(CONNECTORS.get(slug), "attribution", None)
+
+
+def _today() -> date:
+    return datetime.now(timezone.utc).date()
 
 
 def _month_start(today: date, back: int) -> date:
@@ -93,7 +97,7 @@ def list_kpis(
 ):
     if source is not None:
         _source_id_or_404(session, source)
-    today = date.today()
+    today = _today()
     first_month = _month_start(today, 11)
     rows = session.execute(
         text(_KPI_SQL.format(sort=SORTS[sort], order="DESC" if order == "desc" else "ASC")),
