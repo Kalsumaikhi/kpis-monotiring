@@ -13,6 +13,21 @@ from app.connectors.watch.fetch import fetch_target
 FX = Path(__file__).parent / "fixtures" / "watch"
 
 
+def _fake_gai(host, *a, **k):
+    import ipaddress
+    try:
+        ipaddress.ip_address(host)
+        ip = host
+    except ValueError:
+        ip = {"localhost": "127.0.0.1", "meta.example": "169.254.169.254"}.get(host, "93.184.216.34")
+    return [(2, 1, 6, "", (ip, 0))]
+
+
+@pytest.fixture(autouse=True)
+def fake_dns(monkeypatch):
+    monkeypatch.setattr(fetch_mod.socket, "getaddrinfo", _fake_gai)
+
+
 @pytest.fixture(autouse=True)
 def no_throttle(monkeypatch):
     monkeypatch.setattr(fetch_mod, "MIN_INTERVAL", 0.0)
@@ -99,3 +114,61 @@ def test_browser_support_missing(monkeypatch):
     with httpx.Client() as c:
         r = fetch_target(c, "https://h.example/p", use_browser=True)
     assert r.status == "error" and r.error == "browser support not installed"
+
+
+@respx.mock
+@pytest.mark.parametrize("url", ["http://localhost/x", "http://169.254.169.254/latest/meta-data",
+                                 "http://meta.example/x", "http://10.0.0.5/x", "http://[::1]/x"])
+def test_internal_destinations_refused(url):
+    route = respx.route().mock(return_value=httpx.Response(200, text="secret"))
+    with httpx.Client() as c:
+        r = fetch_target(c, url)
+    assert r.status == "error" and r.error == "destination not allowed"
+    assert not route.called
+
+
+@respx.mock
+def test_redirect_to_internal_refused():
+    respx.get("https://h.example/robots.txt").mock(return_value=httpx.Response(404))
+    respx.get("https://h.example/go").mock(
+        return_value=httpx.Response(302, headers={"location": "http://127.0.0.1/admin"}))
+    inner = respx.get("http://127.0.0.1/admin").mock(return_value=httpx.Response(200, text="x"))
+    with httpx.Client(follow_redirects=True) as c:
+        r = fetch_target(c, "https://h.example/go")
+    assert r.error == "destination not allowed" and not inner.called
+
+
+@respx.mock
+def test_redirect_followed_and_robots_rechecked():
+    respx.get("https://h.example/robots.txt").mock(
+        return_value=httpx.Response(200, text="User-agent: *\nDisallow: /private\n"))
+    respx.get("https://h.example/go").mock(
+        return_value=httpx.Response(302, headers={"location": "/private/x"}))
+    respx.get("https://h.example/ok").mock(
+        return_value=httpx.Response(302, headers={"location": "/fine"}))
+    respx.get("https://h.example/fine").mock(return_value=httpx.Response(200, text="done"))
+    priv = respx.get("https://h.example/private/x").mock(return_value=httpx.Response(200, text="x"))
+    with httpx.Client() as c:
+        assert fetch_target(c, "https://h.example/go").status == "blocked"
+        assert fetch_target(c, "https://h.example/ok").body == b"done"
+    assert not priv.called
+
+
+@respx.mock
+def test_redirect_loop_capped():
+    respx.get("https://h.example/robots.txt").mock(return_value=httpx.Response(404))
+    respx.get("https://h.example/loop").mock(
+        return_value=httpx.Response(302, headers={"location": "/loop"}))
+    with httpx.Client() as c:
+        assert fetch_target(c, "https://h.example/loop").error == "too many redirects"
+
+
+@respx.mock
+def test_allow_listed_host_allowed(monkeypatch):
+    from app.config import get_settings
+    monkeypatch.setattr(get_settings(), "watch_allowed_hosts", "127.0.0.1, other.example")
+    respx.get("http://127.0.0.1/robots.txt").mock(return_value=httpx.Response(404))
+    respx.get("http://127.0.0.1/p").mock(return_value=httpx.Response(200, text="in"))
+    with httpx.Client() as c:
+        r = fetch_target(c, "http://127.0.0.1/p")
+    assert r.status == "ok" and r.body == b"in"

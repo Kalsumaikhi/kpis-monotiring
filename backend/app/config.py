@@ -14,6 +14,9 @@ class Settings(BaseSettings):
     raw_retention_runs: int = 5
     suspect_removal_ratio: float = 0.2
     consecutive_failure_alert: int = 3
+    # Comma-separated hostnames/IPs that watch targets may reach even if they resolve to
+    # loopback/private/link-local addresses (internal pages). Default empty: public only.
+    watch_allowed_hosts: str = ""
 
 
 @lru_cache

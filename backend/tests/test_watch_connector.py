@@ -18,6 +18,15 @@ def no_throttle(monkeypatch):
     monkeypatch.setattr(fetch_mod, "MIN_INTERVAL", 0.0)
 
 
+def _fake_gai(host, *a, **k):
+    return [(2, 1, 6, "", ("93.184.216.34", 0))]
+
+
+@pytest.fixture(autouse=True)
+def fake_dns(monkeypatch):
+    monkeypatch.setattr(fetch_mod.socket, "getaddrinfo", _fake_gai)
+
+
 def write_raw(tmp_path, targets):
     p = tmp_path / "raw.json"
     p.write_text(json.dumps({"targets": targets}))
@@ -162,3 +171,48 @@ def test_download_blocked_and_error_targets(wenv, db_session, tmp_path):
     data = {t["kpi_name"]: t for t in json.loads(dest.read_text())["targets"]}
     assert data["Price"]["status"] == "ok" and data["Price"]["text"] == "ok"
     assert data["Priv"]["status"] == "blocked"
+
+
+@respx.mock
+def test_total_failure_still_updates_target_status(wenv, db_session):
+    src, tgt, sf = wenv
+    respx.get("https://h.example/robots.txt").mock(return_value=httpx.Response(404))
+    respx.get("https://h.example/p").mock(return_value=httpx.Response(500))
+    run = pipeline.run_source(sf, "custom-x")
+    assert run.status == "failed" and "all targets failed" in run.error
+    db_session.refresh(tgt)
+    assert tgt.last_status == "error" and tgt.last_error == "HTTP 500"
+    assert tgt.last_checked_at is not None
+    assert db_session.scalars(select(WatchSnapshot)).all() == []
+
+
+@respx.mock
+def test_deeply_nested_json_is_target_error(wenv, db_session, tmp_path):
+    src, tgt, sf = wenv
+    db_session.add(WatchTarget(source_id=src.id, kpi_name="Deep", url="https://h.example/deep", kind="api"))
+    db_session.flush()
+    respx.get("https://h.example/robots.txt").mock(return_value=httpx.Response(404))
+    respx.get("https://h.example/p").mock(
+        return_value=httpx.Response(200, text="<main>ok</main>", headers={"content-type": "text/html"}))
+    respx.get("https://h.example/deep").mock(
+        return_value=httpx.Response(200, text="[" * 100000 + "]" * 100000,
+                                    headers={"content-type": "application/json"}))
+    dest = tmp_path / "r.json"
+    WatchConnector(src.id, "custom-x", "X", sf).download(httpx.Client(), dest)
+    data = {t["kpi_name"]: t for t in json.loads(dest.read_text())["targets"]}
+    assert data["Deep"]["status"] == "error" and data["Price"]["status"] == "ok"
+
+
+@respx.mock
+def test_unexpected_exception_is_target_error(wenv, db_session, tmp_path, monkeypatch):
+    src, tgt, sf = wenv
+    from app.connectors.watch import connector as cmod
+
+    def boom(*a, **k):
+        raise RuntimeError("kaboom")
+
+    monkeypatch.setattr(cmod, "fetch_target", boom)
+    dest = tmp_path / "r.json"
+    WatchConnector(src.id, "custom-x", "X", sf).download(httpx.Client(), dest)
+    t = json.loads(dest.read_text())["targets"][0]
+    assert t["status"] == "error" and "unexpected" in t["error"]

@@ -241,6 +241,18 @@ def _after_run(session: Session, connector, run: Run) -> None:
         session.rollback()
 
 
+def _on_failed(session: Session, connector, run: Run) -> None:
+    """Optional connector hook for failed runs that have a raw file; never raises."""
+    hook = getattr(connector, "on_failed", None)
+    if hook is None:
+        return
+    try:
+        hook(session, run)
+    except Exception as e:  # noqa: BLE001
+        log.error("on_failed failed for run %s: %s", run.id, _safe_error(e))
+        session.rollback()
+
+
 def run_source(
     session_factory: SessionFactory,
     slug: str,
@@ -285,6 +297,7 @@ def run_source(
                 connector.download(client, dest)
         except Exception as e:  # noqa: BLE001
             run = _fail(session, run_id, e)
+            _on_failed(session, connector, run)
             _notify(session, run, notifier)
             return _detach(session, run)
 
@@ -320,6 +333,7 @@ def run_source(
             _finish(session, run, status, diff, parsed.indicators, parsed.vintage, parsed.warnings)
         except Exception as e:  # noqa: BLE001
             run = _fail(session, run_id, e)
+            _on_failed(session, connector, run)
             _notify(session, run, notifier)
             return _detach(session, run)
 

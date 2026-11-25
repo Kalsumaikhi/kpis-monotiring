@@ -66,7 +66,8 @@ def _process(t: dict, res) -> dict:
     if kind == "api":
         try:
             data = json.loads(_decode(res.body, ctype))
-        except ValueError:
+            flatten_json(data)  # deep nesting would blow up later in parse
+        except (ValueError, RecursionError):
             return _entry(t, "error", ctype, "invalid JSON")
         return _entry(t, "ok", ctype, kind="api", json=data)
     if _is_binary(ctype):
@@ -105,9 +106,13 @@ class WatchConnector:
                 )
             ]
         state = FetchState()
-        results = [
-            _process(t, fetch_target(client, t["url"], t["use_browser"], state)) for t in targets
-        ]
+        results = []
+        for t in targets:
+            try:
+                results.append(_process(t, fetch_target(client, t["url"], t["use_browser"], state)))
+            except Exception as e:  # noqa: BLE001 - one bad target must not fail the download
+                log.exception("watch target %s failed unexpectedly", t["id"])
+                results.append(_entry(t, "error", error=f"unexpected error: {type(e).__name__}"))
         tmp = dest.with_name(dest.name + ".part")
         tmp.write_text(json.dumps({"targets": results}), encoding="utf-8")
         tmp.replace(dest)
@@ -138,8 +143,21 @@ class WatchConnector:
             warnings=warnings,
         )
 
+    def on_failed(self, session, run) -> None:
+        """A failed run (e.g. every target failed) still updates each target's status."""
+        try:
+            if not run.raw_path or not Path(run.raw_path).exists():
+                return
+            self._write(session, run, snapshots=False)
+        except Exception:  # noqa: BLE001 - never raises
+            log.exception("watch on_failed failed for run %s", getattr(run, "id", None))
+            session.rollback()
+
     def after_run(self, session, run) -> None:
         """Write snapshots and target status for this run (idempotent per run)."""
+        self._write(session, run, snapshots=True)
+
+    def _write(self, session, run, snapshots: bool) -> None:
         targets = json.loads(Path(run.raw_path).read_text(encoding="utf-8"))["targets"]
         now = datetime.now(timezone.utc)
         keep = max(get_settings().raw_retention_runs, MIN_SNAPSHOTS)
@@ -150,7 +168,7 @@ class WatchConnector:
             target.last_status = t["status"]
             target.last_checked_at = now
             target.last_error = t.get("error")
-            if t["status"] == "ok":
+            if snapshots and t["status"] == "ok":
                 self._snapshot(session, run, t)
                 ids = session.scalars(
                     select(WatchSnapshot.id).where(WatchSnapshot.target_id == target.id)
