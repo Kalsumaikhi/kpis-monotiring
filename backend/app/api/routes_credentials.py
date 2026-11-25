@@ -142,6 +142,12 @@ def _get(session: Session, cid: int) -> Credential:
     return row
 
 
+@router.get("/credentials/status")
+def credentials_status():
+    """Whether KPI_SECRET_KEY is set, so the UI can say so before anyone tries to save a key."""
+    return {"configured": _fernet() is not None}
+
+
 @router.get("/credentials")
 def list_credentials(session: Session = Depends(get_session)):
     rows = session.scalars(select(Credential).order_by(Credential.name)).all()

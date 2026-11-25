@@ -2,6 +2,7 @@
 import { onMounted, reactive, ref } from 'vue'
 import { ApiError, apiGet, apiSend } from '../../api/client'
 import type { RunNowResult, Source, SourcePatchResult, StoredKey } from '../../api/types'
+import { fetchKeys } from '../../composables/useKeys'
 import StatusBadge from '../../components/StatusBadge.vue'
 import { useToast } from '../../composables/useToast'
 import { absoluteTime, relativeTime } from '../../lib/format'
@@ -24,15 +25,11 @@ async function load() {
   loading.value = true
   error.value = null
   try {
-    const all = await apiGet<Source[]>('/api/sources')
-    sources.value = all.filter((s) => s.access !== 'watch')
-    for (const s of sources.value) cron[s.slug] = s.cron ?? ''
-    if (sources.value.some((s) => s.credential_supported)) {
-      try {
-        const ks = await apiGet<StoredKey[]>('/api/credentials')
-        keys.value = Array.isArray(ks) ? ks : []
-      } catch { keys.value = [] }
-    }
+    const list = (await apiGet<Source[]>('/api/sources')).filter((s) => s.access !== 'watch')
+    // Keys first: a <select> bound before its options exist would show "None" for a source that has a key.
+    keys.value = list.some((s) => s.credential_supported) ? await fetchKeys() : []
+    sources.value = list
+    for (const s of list) cron[s.slug] = s.cron ?? ''
   } catch (e) {
     error.value = e instanceof ApiError ? e.detail : 'Could not load sources'
   } finally {

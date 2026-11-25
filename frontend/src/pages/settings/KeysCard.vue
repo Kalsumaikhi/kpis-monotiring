@@ -24,6 +24,10 @@ async function load() {
   loading.value = true
   error.value = null
   try {
+    try {
+      const st = await apiGet<{ configured?: boolean }>('/api/credentials/status')
+      unavailable.value = st?.configured === false
+    } catch { /* unknown: the server still answers 503 on a write */ }
     const res = await apiGet<StoredKey[]>('/api/credentials')
     keys.value = Array.isArray(res) ? res : []
   } catch (e) {
@@ -104,7 +108,7 @@ async function doDelete() {
       <button type="button" class="btn secondary" @click="inUse = null">Dismiss</button>
     </div>
 
-    <KeyForm v-if="form" :key="form.id" :key-item="form.key" :replace="form.replace" @saved="onSaved" @cancel="form = null" @unavailable="unavailable = true" />
+    <KeyForm v-if="form" :key="form.id" :key-item="form.key" :replace="form.replace" :unavailable="unavailable" @saved="onSaved" @cancel="form = null" @unavailable="unavailable = true" />
 
     <p v-if="loading && !keys.length" class="muted state">Loading…</p>
     <p v-else-if="!keys.length && !error" class="muted state">No keys yet. Add one to watch links that need a login or API token.</p>
@@ -131,7 +135,7 @@ async function doDelete() {
 
     <ConfirmDialog
       :open="pendingDelete !== null" :title="`Delete key “${pendingDelete?.name ?? ''}”?`"
-      message="The stored secret is removed for good. KPIs using it can't be changed until it's no longer in use." confirm-label="Delete key" danger
+      message="Keys that are in use can't be deleted — remove them from those KPIs and sources first." confirm-label="Delete key" danger
       @confirm="doDelete" @cancel="pendingDelete = null"
     />
   </section>

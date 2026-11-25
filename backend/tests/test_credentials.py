@@ -131,6 +131,13 @@ def test_missing_secret_key_503(client, monkeypatch):
     assert r.json() == {"detail": "KPI_SECRET_KEY is not set — see README → Keys"}
 
 
+def test_status_reports_configuration(client, monkeypatch):
+    assert client.get("/api/credentials/status").json() == {"configured": True}
+    monkeypatch.delenv("KPI_SECRET_KEY")
+    assert client.get("/api/credentials/status").json() == {"configured": False}
+    assert client.get("/api/credentials/status", auth=None).status_code == 401
+
+
 def test_wrong_secret_key_marks_unreadable(client, monkeypatch):
     client.post("/api/credentials", json=body())
     monkeypatch.setenv("KPI_SECRET_KEY", Fernet.generate_key().decode())

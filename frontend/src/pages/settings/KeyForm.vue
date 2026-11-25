@@ -1,10 +1,10 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ApiError, apiSend } from '../../api/client'
 import type { KeyIn, KeyKind, KeyPatch, StoredKey } from '../../api/types'
 
 // mode "replace" shows only the secret field (PATCH {secret}); "edit" leaves the secret blank to keep it.
-const props = defineProps<{ keyItem?: StoredKey | null; replace?: boolean }>()
+const props = defineProps<{ keyItem?: StoredKey | null; replace?: boolean; unavailable?: boolean }>()
 const emit = defineEmits<{ saved: []; cancel: []; unavailable: [] }>()
 
 const editing = computed(() => !!props.keyItem)
@@ -27,7 +27,14 @@ const kindOk = computed(() => {
   if (kind.value === 'basic') return username.value.trim() !== ''
   return true
 })
-const valid = computed(() => (props.replace ? true : name.value.trim() !== '' && kindOk.value) && (!secretRequired.value || secret.value !== ''))
+const valid = computed(() => !(props.unavailable && (secretRequired.value || secret.value !== '')) && (props.replace ? true : name.value.trim() !== '' && kindOk.value) && (!secretRequired.value || secret.value !== ''))
+
+onBeforeUnmount(() => { secret.value = '' })
+function cancel() {
+  secret.value = ''
+  showSecret.value = false
+  emit('cancel')
+}
 
 onMounted(async () => {
   await nextTick()
@@ -123,15 +130,16 @@ const title = computed(() => (props.replace ? `Replace secret for ${props.keyIte
       <div class="secret">
         <input
           id="kf-secret" :ref="(el) => { if (replace) first = el as HTMLElement }" v-model="secret" :type="showSecret ? 'text' : 'password'"
-          class="mono" autocomplete="new-password" autocapitalize="off" spellcheck="false" :required="secretRequired" data-test="secret"
+          class="mono" autocomplete="new-password" autocapitalize="off" spellcheck="false" :required="secretRequired" :disabled="unavailable" data-test="secret"
         />
-        <button type="button" class="btn secondary" :aria-pressed="showSecret" data-test="toggle-secret" @click="showSecret = !showSecret">{{ showSecret ? 'Hide' : 'Show' }}</button>
+        <button type="button" class="btn secondary" aria-label="Show secret" aria-controls="kf-secret" :aria-pressed="showSecret" data-test="toggle-secret" @click="showSecret = !showSecret">{{ showSecret ? 'Hide' : 'Show' }}</button>
       </div>
     </div>
 
+    <p v-if="unavailable" class="muted small">Secrets can't be saved until KPI_SECRET_KEY is set on the server.</p>
     <p v-if="error" class="error-text" role="alert">{{ error }}</p>
     <div class="toolbar end">
-      <button type="button" class="btn secondary" @click="emit('cancel')">Cancel</button>
+      <button type="button" class="btn secondary" data-test="cancel" @click="cancel">Cancel</button>
       <button type="submit" class="btn" :disabled="!valid || saving">{{ saving ? 'Saving…' : replace ? 'Replace secret' : editing ? 'Save changes' : 'Add key' }}</button>
     </div>
   </form>

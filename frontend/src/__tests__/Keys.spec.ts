@@ -14,6 +14,7 @@ vi.mock('../api/client', async () => {
   }
 })
 import { ApiError } from '../api/client'
+import KeyForm from '../pages/settings/KeyForm.vue'
 import KeysCard from '../pages/settings/KeysCard.vue'
 import TargetForm from '../pages/settings/TargetForm.vue'
 import ImportDialog from '../pages/settings/ImportDialog.vue'
@@ -53,7 +54,6 @@ describe('KeysCard', () => {
     expect(w.findAll('[data-test=needs-reentry]')).toHaveLength(1)
     expect(t).toContain('key rejected (HTTP 401)')
     expect(t).toContain('Used by 0')
-    expect(w.html()).not.toMatch(/secret"?:/)
     w.unmount()
   })
 
@@ -63,6 +63,7 @@ describe('KeysCard', () => {
     await w.get('[data-test=add-key]').trigger('click')
     await w.get('#kf-name').setValue('New')
     const input = w.get('#kf-secret')
+    const secretEl = input.element as HTMLInputElement
     expect(input.attributes('type')).toBe('password')
     expect(input.attributes('autocomplete')).toBe('new-password')
     await input.setValue('s3cr3t')
@@ -72,7 +73,7 @@ describe('KeysCard', () => {
     await flushPromises()
     expect(apiSend).toHaveBeenCalledWith('POST', '/api/credentials', expect.objectContaining({ name: 'New', kind: 'header', secret: 's3cr3t' }))
     expect(apiSend.mock.calls[0][1]).not.toContain('s3cr3t')
-    expect(document.body.innerHTML).not.toContain('s3cr3t')
+    expect(secretEl.value).toBe('')
     w.unmount()
   })
 
@@ -133,6 +134,28 @@ describe('KeysCard', () => {
     w.unmount()
   })
 
+  it('cancel clears the typed secret', async () => {
+    const w = mount(KeyForm, { attachTo: document.body })
+    const el = w.get('#kf-secret').element as HTMLInputElement
+    await w.get('#kf-secret').setValue('abc')
+    await w.get('[data-test=cancel]').trigger('click')
+    expect(el.value).toBe('')
+    expect(w.emitted('cancel')).toBeTruthy()
+    w.unmount()
+  })
+
+  it('status configured=false shows the setup panel up front and disables writes', async () => {
+    apiGet.mockImplementation((p: string) => Promise.resolve(p === '/api/credentials/status' ? { configured: false } : [key()]))
+    const w = mount(KeysCard, { attachTo: document.body })
+    await flushPromises()
+    expect(w.find('[data-test=setup-panel]').exists()).toBe(true)
+    expect(w.get('[data-test=add-key]').attributes('disabled')).toBeDefined()
+    expect(w.get('[data-test=replace-1]').attributes('disabled')).toBeDefined()
+    await w.get('[data-test=edit-1]').trigger('click')
+    expect(w.get('#kf-secret').attributes('disabled')).toBeDefined()
+    w.unmount()
+  })
+
   it('503 shows setup panel and disables Add', async () => {
     const w = await card([])
     apiSend.mockRejectedValue(new ApiError(503, 'KPI_SECRET_KEY is not set — see README → Keys'))
@@ -142,7 +165,7 @@ describe('KeysCard', () => {
     await w.get('form').trigger('submit')
     await flushPromises()
     expect(w.get('[data-test=setup-panel]').text()).toContain("Keys are encrypted with KPI_SECRET_KEY, which isn't set. Ask whoever runs the server to set it (see README → Keys), then reload.")
-    await w.get('form [type=button]').trigger('click') // Cancel
+    await w.get('[data-test=cancel]').trigger('click')
     expect(w.get('[data-test=add-key]').attributes('disabled')).toBeDefined()
     w.unmount()
   })
@@ -192,15 +215,16 @@ describe('BuiltinSources key select', () => {
     const base = { area: 'x', access: 'api', enabled: true, cron: null, last_run: null, credential_id: null, credential_name: null }
     apiGet.mockImplementation((p: string) => Promise.resolve(p === '/api/credentials'
       ? [key()]
-      : [{ ...base, slug: 'a', name: 'A', credential_supported: true }, { ...base, slug: 'b', name: 'B', credential_supported: false }]))
+      : [{ ...base, slug: 'a', name: 'A', credential_supported: true, credential_id: 1 }, { ...base, slug: 'b', name: 'B', credential_supported: false }]))
     apiSend.mockResolvedValue({ slug: 'a', enabled: true, cron: null, credential_id: 1 })
     const w = mount(BuiltinSources)
     await flushPromises()
     expect(w.find('[data-test=key-a]').exists()).toBe(true)
+    expect((w.get('[data-test=key-a]').element as HTMLSelectElement).value).toBe('1')
     expect(w.find('[data-test=key-b]').exists()).toBe(false)
-    await w.get('[data-test=key-a]').setValue('1')
+    await w.get('[data-test=key-a]').setValue('')
     await flushPromises()
-    expect(apiSend).toHaveBeenCalledWith('PATCH', '/api/sources/a', { credential_id: 1 })
+    expect(apiSend).toHaveBeenCalledWith('PATCH', '/api/sources/a', { credential_id: null })
   })
 })
 

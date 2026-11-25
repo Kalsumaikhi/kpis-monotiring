@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
-import { ApiError, apiGet, apiSend } from '../../api/client'
+import { ApiError, apiSend } from '../../api/client'
+import { fetchKeys } from '../../composables/useKeys'
 import type { StoredKey, TargetIn, TargetPatch, TestLinkResult, WatchKind, WatchTarget } from '../../api/types'
 
 const props = defineProps<{ sourceNames: string[]; target?: WatchTarget | null; sourceName?: string; openAdvanced?: boolean }>()
@@ -40,17 +41,8 @@ defineExpose({ dirty })
 // Any change to what is tested makes an old preview misleading.
 watch([url, selector, kind, useBrowser, credentialId], () => { testResult.value = null; testError.value = '' })
 
-async function loadKeys() {
-  try {
-    const res = await apiGet<StoredKey[]>('/api/credentials')
-    keys.value = Array.isArray(res) ? res.filter((k) => k && typeof k === 'object' && 'has_secret' in k) : []
-  } catch {
-    keys.value = [] // the Key select just offers "None"
-  }
-}
-
 onMounted(async () => {
-  void loadKeys()
+  void fetchKeys().then((k) => { keys.value = k })
   await nextTick()
   if (props.openAdvanced) document.getElementById('tf-selector')?.focus()
   else first.value?.focus()
