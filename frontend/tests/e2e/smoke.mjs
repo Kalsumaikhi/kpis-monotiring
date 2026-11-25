@@ -3,6 +3,7 @@
 import { createRequire } from 'node:module'
 import http from 'node:http'
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import assert from 'node:assert/strict'
 
@@ -10,13 +11,16 @@ const require = createRequire(import.meta.url)
 const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright')
 
 const BASE = process.env.E2E_BASE_URL || 'http://localhost:8080'
+// 'dev' is a TEST-ONLY password for a throwaway local stack. Never use it (or this default) anywhere real.
 const PASSWORD = process.env.DASHBOARD_PASSWORD || 'dev'
 const PAGE_PORT = Number(process.env.E2E_PAGE_PORT || 8765)
-const SHOTS = process.env.E2E_SCREENSHOTS || path.resolve(import.meta.dirname, '../../../docs/screenshots')
+// README screenshots come from screenshots.mjs on clean demo data; the smoke test only writes scratch shots.
+const SHOTS = process.env.E2E_SCREENSHOTS || fs.mkdtempSync(path.join(os.tmpdir(), 'kpi-e2e-shots-'))
 const MM_LOG = process.env.E2E_MM_LOG // optional Mattermost stub log, printed at the end
 const RUN = Date.now().toString(36)
 const SRC = `E2E Pages ${RUN}`
 const IMP = `E2E Imports ${RUN}`
+const csvPath = path.join(os.tmpdir(), `kpi-e2e-import-${RUN}.csv`)
 const AUTH = 'Basic ' + Buffer.from(`x:${PASSWORD}`).toString('base64')
 
 let html = '<html><body><h1>Pricing</h1><p>Plan A costs 10 EUR</p></body></html>'
@@ -30,6 +34,22 @@ const api = async (p, init = {}) => {
   const r = await fetch(BASE + p, { ...init, headers: { authorization: AUTH, ...(init.headers || {}) } })
   if (!r.ok) throw new Error(`${p} -> ${r.status}`)
   return r.status === 204 ? null : r.json()
+}
+// Remove every source/KPI this run created. Runs on success, failure and SIGINT/SIGTERM.
+async function cleanup() {
+  try {
+    for (const s of await api('/api/custom-sources')) {
+      if (![SRC, IMP].includes(s.name)) continue
+      for (const t of s.targets) await api(`/api/watch-targets/${t.id}`, { method: 'DELETE' })
+    }
+  } catch (e) { console.error('cleanup failed:', e.message) }
+}
+for (const sig of ['SIGINT', 'SIGTERM']) {
+  process.on(sig, async () => {
+    await cleanup()
+  fs.rmSync(csvPath, { force: true })
+    process.exit(130)
+  })
 }
 const step = (n, msg) => console.log(`[${n}] ${msg}`)
 const shot = (page, name) => page.screenshot({ path: path.join(SHOTS, name), animations: 'disabled' })
@@ -46,7 +66,8 @@ async function waitFinished(slug, before, timeoutMs = 90000) {
 }
 
 fs.mkdirSync(SHOTS, { recursive: true })
-const browser = await chromium.launch({ executablePath: process.env.KPI_CHROMIUM_PATH || undefined, args: ['--no-sandbox'] })
+const browser = await chromium.launch({ executablePath: process.env.KPI_CHROMIUM_PATH || undefined, // --no-sandbox: the container runs as root, where Chromium's sandbox cannot start. Fine for a local test browser.
+  args: ['--no-sandbox'] })
 const ctx = await browser.newContext({ viewport: { width: 1280, height: 800 }, deviceScaleFactor: 2 })
 const page = await ctx.newPage()
 page.setDefaultTimeout(15000)
@@ -127,7 +148,8 @@ try {
   assert.equal(r1.status, 'baseline', 'first check is a silent baseline')
   step(5, `Run now -> run #${r1.id} status=${r1.status} (silent baseline)`)
   await page.goto(BASE + '/settings')
-  await page.getByRole('region', { name: SRC }).getByText('OK', { exact: false }).first().waitFor().catch(() => {})
+  await page.getByRole('region', { name: SRC }).locator('tbody tr', { hasText: 'Pricing' }).getByText('OK', { exact: true }).waitFor({ timeout: 20000 })
+  step(5, 'Settings shows the target status OK')
 
   // 6. change the page, run again
   html = '<html><body><h1>Pricing</h1><p>Plan A costs 12 EUR</p></body></html>'
@@ -154,7 +176,6 @@ try {
     `${IMP},Beta,http://127.0.0.1:${PAGE_PORT}/b.html`,
     `${SRC},Pricing,http://127.0.0.1:${PAGE_PORT}/page.html`,
   ].join('\r\n') + '\r\n'
-  const csvPath = path.join(SHOTS, '..', `.e2e-import-${RUN}.csv`)
   fs.writeFileSync(csvPath, csv)
   await page.goto(BASE + '/settings')
   await page.locator('[data-test=import]').click()
@@ -171,7 +192,6 @@ try {
   assert(/Created 2 KPIs/.test(res), res)
   step(7, 'confirm: ' + res.replace(/\s+/g, ' '))
   await dlg.getByRole('button', { name: 'Close' }).click()
-  fs.unlinkSync(csvPath)
 
   // 8. delete one imported KPI (screenshot first, so Settings shows both groups)
   await page.getByRole('region', { name: IMP }).waitFor()
@@ -185,17 +205,14 @@ try {
   assert.equal(await page.getByRole('region', { name: IMP }).locator('tbody tr').count(), 1)
   step(8, 'deleted imported KPI "Alpha"; "Beta" remains')
 
-  // cleanup of everything this run created
-  for (const s of await api('/api/custom-sources')) {
-    if (![SRC, IMP].includes(s.name)) continue
-    for (const t of s.targets) await api(`/api/watch-targets/${t.id}`, { method: 'DELETE' })
-  }
   step('done', 'ALL PASSED; test KPIs cleaned up')
 } catch (e) {
   console.error('FAILED:', e)
-  await page.screenshot({ path: path.join(SHOTS, '..', 'e2e-failure.png') }).catch(() => {})
+  await page.screenshot({ path: path.join(SHOTS, 'e2e-failure.png') }).catch(() => {})
+  console.error('failure screenshot in ' + SHOTS)
   process.exitCode = 1
 } finally {
+  await cleanup()
   if (MM_LOG && fs.existsSync(MM_LOG)) console.log('Mattermost messages received:\n' + fs.readFileSync(MM_LOG, 'utf8'))
   await browser.close()
   server.close()

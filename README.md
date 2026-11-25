@@ -120,7 +120,7 @@ Besides the built-in datasets you can watch any web page or JSON API link (Setti
 
 - **Add KPI**: source name, KPI name, link. "Test link" shows what would be read. Under Advanced you can set a CSS selector (focus area), force page/API mode, or ask for a headless browser for JavaScript-built pages.
 - **Import from Excel/CSV**: a `.xlsx` or `.csv` with the columns `Source name`, `KPI name`, `Link` (the dialog offers a template). The preview marks each row as new, existing, duplicate (skipped) or invalid before anything is created.
-- **First check**: a new KPI's first check only records a baseline; no change alert is sent. Alerts start from the second check that finds a change. The Mattermost message lists the changed KPI pages with a short `+`/`-` excerpt.
+- **First check**: a new KPI's first check only records a baseline; no change alert is sent. Alerts (and Mattermost messages) start with the second check that finds a change; built-in sources still post a one-line "baseline loaded" note. The Mattermost message lists the changed KPI pages with a short `+`/`-` excerpt.
 - **Politeness and safety**: `robots.txt` is respected, requests are limited to 1 per second per host, and links to internal addresses (loopback, private ranges) are blocked unless the host is listed in `WATCH_ALLOWED_HOSTS`.
 
 Additional environment variables:
@@ -136,13 +136,25 @@ Every dashboard page that shows data from a built-in source carries that source'
 
 ## End-to-end test
 
-`frontend/tests/e2e/smoke.mjs` drives a real browser through the whole stack: login, overview, changes and run detail, explorer chart, KPI frequency, adding and testing a custom KPI, a baseline run then a changed-page run (the `+` excerpt), CSV import with a duplicate, and delete. It also refreshes `docs/screenshots/`. It needs the api, the worker and the built frontend running, with a Mattermost webhook stub optional:
+`frontend/tests/e2e/smoke.mjs` drives a real browser through the whole stack: login, overview, changes and run detail, explorer chart, KPI frequency, adding and testing a custom KPI, a baseline run then a changed-page run (the `+` excerpt), CSV import with a duplicate, and delete. It needs the api, the worker and the built frontend running. Requirements: Node 20.11 or newer, Playwright with a Chromium it can launch (the test looks for the `playwright` module via normal resolution; set `PLAYWRIGHT_MODULE` to a path if it is installed globally; the browser starts with `--no-sandbox` so it also works as root in containers), and the backend dependencies (`uv`). `dev` below is a **test-only password** for a throwaway local stack; never use it for a real deployment.
 
 ```sh
-cd backend && DATABASE_URL=... DASHBOARD_PASSWORD=dev WATCH_ALLOWED_HOSTS=127.0.0.1,localhost uv run uvicorn app.api.main:app --port 8000 &
-cd backend && (same env) uv run python -m app.worker &
-cd frontend && npm run build && npx vite preview --port 8080 &
-cd frontend && npm run e2e     # needs Playwright and Chromium (NODE_PATH or PLAYWRIGHT_MODULE)
+export DATABASE_URL=postgresql+psycopg://kpi:kpi@localhost:5432/kpi
+export DASHBOARD_PASSWORD=dev                      # test-only password
+export WATCH_ALLOWED_HOSTS=127.0.0.1,localhost     # lets the test watch its local page server
+export RAW_DIR=/tmp/kpi-raw && mkdir -p "$RAW_DIR"
+# optional: MATTERMOST_WEBHOOK_URL=http://127.0.0.1:8766/hook (a stub server of your own)
+
+(cd backend && uv run alembic upgrade head)
+(cd backend && uv run uvicorn app.api.main:app --port 8000) &
+(cd backend && uv run python -m app.worker) &
+(cd frontend && npm run build && npx vite preview --port 8080) &
+
+cd frontend
+npm run e2e                                        # the smoke test
+node tests/e2e/screenshots.mjs                     # optional: regenerate docs/screenshots/
+
+kill %1 %2 %3                                      # stop the three background servers
 ```
 
-The test serves its own page on 127.0.0.1:8765 (`E2E_PAGE_PORT`), cleans up the KPIs it creates, and waits up to 90 s per run for the worker.
+The test serves its own page on 127.0.0.1:8765 (`E2E_PAGE_PORT`), removes the KPIs it creates (also on failure or Ctrl-C), and waits up to 90 s per run for the worker.

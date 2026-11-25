@@ -53,6 +53,13 @@ def test_watch_message_caps_names_and_lines_and_joins_api_block():
                    "Top indicators: p (3)\n[View changes](http://dash/runs/7)")
 
 
+def test_watch_baseline_is_silent_but_builtin_baseline_is_announced():
+    watch = Source(slug="w", name="W", area="custom", access="watch")
+    api = Source(slug="a", name="A", area="x", access="api")
+    assert fmt(mk_run(status="baseline", rows_total=3), watch) is None
+    assert fmt(mk_run(status="baseline", rows_total=3), api) == "**A** — baseline loaded: 3 rows"
+
+
 def test_incomplete_note_appended_or_alone():
     src = Source(slug="x", name="S", area="a", access="api")
     note = "2 indicators failed"

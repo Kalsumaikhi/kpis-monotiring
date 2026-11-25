@@ -99,6 +99,8 @@ def _base_message(run, source, top_indicators, streak, dashboard_base_url,
                          top_indicators, link)
 
     if run.status == "baseline":
+        if source.access == "watch":
+            return None  # custom sources: first check is silent (R18)
         return f"**{name}** — baseline loaded: {run.rows_total:,} rows"
 
     if run.status == "failed":
