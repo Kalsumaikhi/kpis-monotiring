@@ -204,37 +204,16 @@ def pending(db_session, session_factory, monkeypatch):
     return src, run
 
 
-def test_preview_changes_does_not_write(db_session, pending):
-    src, run = pending
-    before = db_session.scalar(select(Change.id).limit(1))
-    dp_before = db_session.scalar(select(func.count()).select_from(DataPoint))
-    items, total = pipeline.preview_changes(db_session, run.id)
-    assert total == 4
-    by = {(i["change_type"], i["country"]): i for i in items}
-    assert set(by) == {("altered", "BE"), ("added", "FR"), ("removed", "DE"), ("removed", "ES")}
-    assert by[("altered", "BE")]["old"] == Decimal("1") and by[("altered", "BE")]["new"] == Decimal("9")
-    assert by[("removed", "DE")]["new"] is None and by[("added", "FR")]["old"] is None
-    assert db_session.scalar(select(Change.id).limit(1)) == before  # nothing recorded
-    assert db_session.scalar(select(func.count()).select_from(DataPoint)) == dp_before
-    assert db_session.get(Run, run.id).status == "suspect_pending"
-    items, total = pipeline.preview_changes(db_session, run.id, change_type="removed", page_size=1)
-    assert total == 2 and len(items) == 1
-    _, total = pipeline.preview_changes(db_session, run.id, country="FR")
-    assert total == 1
-    _, total = pipeline.preview_changes(db_session, run.id, indicator="other")
-    assert total == 0
-    with pytest.raises(ValueError):
-        pipeline.preview_changes(db_session, run.id + 1000)
-
-
-def test_pending_run_changes_endpoint_and_approve(client, db_session, pending):
+def test_pending_run_changes_endpoint_and_approve(client, db_session, session_factory, pending):
     src, run = pending
     r = client.get(f"/api/runs/{run.id}/changes?change_type=removed").json()
     assert r["pending"] is True and r["total"] == 2
     assert {i["country"] for i in r["items"]} == {"DE", "ES"}
     assert r["items"][0]["old"] == "1"
     a = client.post(f"/api/runs/{run.id}/approve")
-    assert a.status_code == 200 and a.json()["status"] == "ok"
+    assert a.status_code == 202 and a.json()["status"] == "approve_queued"
+    from app.worker import poll_queued_once
+    poll_queued_once(session_factory, None)
     after = client.get(f"/api/runs/{run.id}/changes").json()
     assert "pending" not in after and after["total"] == 4
 
@@ -246,32 +225,11 @@ def test_reject_pending(client, db_session, pending):
     assert client.post(f"/api/runs/{run.id}/reject").status_code == 409
 
 
-def test_approve_and_reject_source_busy_409(client, pending, held_lock):
+def test_reject_source_busy_409(client, pending, held_lock):
     src, run = pending
     held_lock(src.id)
-    r = client.post(f"/api/runs/{run.id}/approve")
-    assert r.status_code == 409 and r.json()["detail"] == "source busy"
     r = client.post(f"/api/runs/{run.id}/reject")
     assert r.status_code == 409 and r.json()["detail"] == "source busy"
-
-
-def test_preview_missing_raw_file_409(client, db_session, pending):
-    import os
-    _, run = pending
-    os.remove(db_session.get(Run, run.id).raw_path)
-    r = client.get(f"/api/runs/{run.id}/changes")
-    assert r.status_code == 409 and r.json()["detail"] == "raw file unavailable for preview"
-
-
-def test_preview_unparseable_raw_file_409(client, db_session, pending, monkeypatch):
-    _, run = pending
-
-    def boom(raw):
-        raise RuntimeError("bad file")
-
-    monkeypatch.setattr(registry.CONNECTORS["fake"], "parse", boom)
-    r = client.get(f"/api/runs/{run.id}/changes")
-    assert r.status_code == 409 and r.json()["detail"] == "raw file could not be parsed"
 
 
 def _api_routes():
@@ -296,15 +254,3 @@ def test_second_queued_insert_is_409(client, db_session, source, monkeypatch):
     db_session.commit()
     monkeypatch.setattr("app.api.routes_sources._has_open_run", lambda *a: False)
     assert client.post(f"/api/sources/{source.slug}/run").status_code == 409
-
-
-def test_preview_db_error_is_not_a_409(db_session, pending, monkeypatch):
-    from sqlalchemy.exc import OperationalError
-    _, run = pending
-
-    def down(*a, **k):
-        raise OperationalError("stmt", {}, Exception("db down"))
-
-    monkeypatch.setattr(pipeline, "stage_rows", down)
-    with pytest.raises(OperationalError):
-        pipeline.preview_changes(db_session, run.id)

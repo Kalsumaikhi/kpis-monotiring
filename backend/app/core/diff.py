@@ -116,33 +116,43 @@ def compute_diff(session: Session, source_id: int, complete: bool) -> DiffResult
     return DiffResult(*row)
 
 
+def _insert_changes(table: str, session: Session, source_id: int, run_id: int, complete: bool) -> None:
+    """Insert the would-be changes (staging vs data_points) into `table`; never touches data_points."""
+    removed_clause = "OR s.key_hash IS NULL" if complete else ""
+    session.execute(
+        text(
+            f"""
+            INSERT INTO {table} (run_id, source_id, key_hash, change_type, dataset,
+                indicator, country, period, dims, old_num, old_text, new_num, new_text)
+            SELECT :rid, :sid, COALESCE(s.key_hash, d.key_hash),
+                CASE WHEN d.key_hash IS NULL THEN 'added'
+                     WHEN s.key_hash IS NULL THEN 'removed' ELSE 'altered' END,
+                COALESCE(s.dataset, d.dataset), COALESCE(s.indicator, d.indicator),
+                COALESCE(s.country, d.country), COALESCE(s.period, d.period),
+                COALESCE(s.dims, d.dims),
+                d.value_num, d.value_text, s.value_num, s.value_text
+            FROM staging s
+            FULL OUTER JOIN (SELECT * FROM data_points WHERE source_id = :sid) d
+                ON d.key_hash = s.key_hash
+            WHERE d.key_hash IS NULL OR s.value_hash <> d.value_hash {removed_clause}
+            """
+        ),
+        {"sid": source_id, "rid": run_id},
+    )
+
+
+def record_pending(session: Session, source_id: int, run_id: int, complete: bool) -> None:
+    """Store a held run's would-be changes in pending_changes (data_points untouched)."""
+    _insert_changes("pending_changes", session, source_id, run_id, complete)
+
+
 def apply_diff(
     session: Session, source_id: int, run_id: int, complete: bool, record_changes: bool
 ) -> None:
     params = {"sid": source_id, "rid": run_id}
     # Order matters: changes read old values, so they go in before data_points is touched.
     if record_changes:
-        removed_clause = "OR s.key_hash IS NULL" if complete else ""
-        session.execute(
-            text(
-                f"""
-                INSERT INTO changes (run_id, source_id, key_hash, change_type, dataset,
-                    indicator, country, period, dims, old_num, old_text, new_num, new_text)
-                SELECT :rid, :sid, COALESCE(s.key_hash, d.key_hash),
-                    CASE WHEN d.key_hash IS NULL THEN 'added'
-                         WHEN s.key_hash IS NULL THEN 'removed' ELSE 'altered' END,
-                    COALESCE(s.dataset, d.dataset), COALESCE(s.indicator, d.indicator),
-                    COALESCE(s.country, d.country), COALESCE(s.period, d.period),
-                    COALESCE(s.dims, d.dims),
-                    d.value_num, d.value_text, s.value_num, s.value_text
-                FROM staging s
-                FULL OUTER JOIN (SELECT * FROM data_points WHERE source_id = :sid) d
-                    ON d.key_hash = s.key_hash
-                WHERE d.key_hash IS NULL OR s.value_hash <> d.value_hash {removed_clause}
-                """
-            ),
-            params,
-        )
+        _insert_changes("changes", session, source_id, run_id, complete)
     session.execute(
         text(
             """
