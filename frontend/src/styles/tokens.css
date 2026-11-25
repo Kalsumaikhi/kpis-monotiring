@@ -65,6 +65,10 @@
 
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme='light']) {
+    --c-dark-green: #063b2b;
+    --c-spring-green: #05ea7d;
+    --c-mid-green: #00874f;
+    --c-light-green: #e8f2dd;
     --bg: #04211a;
     --surface: #0a3022;
     --surface-2: #08281d;
@@ -92,6 +96,10 @@
 }
 
 :root[data-theme='dark'] {
+  --c-dark-green: #063b2b;
+  --c-spring-green: #05ea7d;
+  --c-mid-green: #00874f;
+  --c-light-green: #e8f2dd;
   --bg: #04211a;
   --surface: #0a3022;
   --surface-2: #08281d;
