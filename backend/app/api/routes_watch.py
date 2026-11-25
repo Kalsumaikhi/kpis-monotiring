@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import secrets
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Literal
 from urllib.parse import urlsplit
@@ -19,6 +20,7 @@ from app import watch_import
 from app.api.deps import get_session
 from app.api.util import iso
 from app.connectors.watch import noisy_target_ids
+from app.core.pipeline import SourceBusyError, _acquire_source_lock
 from app.core.canonical import dims_to_json, key_hash_for
 from app.connectors.watch.connector import _process
 from app.connectors.watch.extract import flatten_json
@@ -129,7 +131,7 @@ def _conflict(session: Session, source_id: int, kpi_name: str, url: str,
     q = select(WatchTarget).where(WatchTarget.source_id == source_id)
     if exclude_id is not None:
         q = q.where(WatchTarget.id != exclude_id)
-    for t in session.scalars(q.where((WatchTarget.url == url) | (WatchTarget.kpi_name == kpi_name))):
+    for t in session.scalars(q.where((WatchTarget.url == url) | (func.lower(WatchTarget.kpi_name) == kpi_name.lower()))):
         return "a KPI with this link already exists" if t.url == url else \
             "a KPI with this name already exists in the source"
     return None
@@ -188,56 +190,90 @@ def _target_or_404(session: Session, target_id: int) -> WatchTarget:
     return t
 
 
+@contextmanager
+def _source_lock(session: Session, source_id: int):
+    """Non-blocking per-source advisory lock (same as run_source); 409 while a run holds it."""
+    try:
+        release = _acquire_source_lock(session, source_id)
+    except SourceBusyError:
+        session.rollback()
+        raise HTTPException(409, "source is running, try again") from None
+    try:
+        yield
+    finally:
+        release()
+
+
 @router.patch("/watch-targets/{target_id}")
 def patch_target(target_id: int, body: TargetPatch, session: Session = Depends(get_session)):
     t = _target_or_404(session, target_id)
     new_name = body.kpi_name if body.kpi_name is not None else t.kpi_name
     new_url = body.url if body.url is not None else t.url
+    renames, repoints = new_name != t.kpi_name, new_url != t.url
+    disables = body.enabled is False and t.enabled
+    if not (renames or repoints or disables):
+        _apply_patch(session, t, body, new_name, new_url)
+        return _target_json(t)
+    with _source_lock(session, t.source_id):
+        session.refresh(t)  # state may have changed while waiting
+        _apply_patch(session, t, body, new_name, new_url)
+    return _target_json(t)
+
+
+def _apply_patch(session: Session, t: WatchTarget, body: TargetPatch, new_name: str,
+                 new_url: str) -> None:
     if (new_name, new_url) != (t.kpi_name, t.url):
         msg = _conflict(session, t.source_id, new_name, new_url, exclude_id=t.id)
         if msg:
             raise HTTPException(409, msg)
     old_name = t.kpi_name
-    if body.url is not None and new_url != t.url:
-        _delete_points(session, t.source_id, old_name)  # a new link is a new baseline
-        t.url, t.needs_baseline = new_url, True
-        t.last_status, t.last_checked_at, t.last_error = "never", None, None
-    if new_name != old_name:
-        # indicator is part of key_hash, so the hash is recomputed (same formula as canonical)
-        for dp in session.scalars(select(DataPoint).where(
-                DataPoint.source_id == t.source_id, DataPoint.dataset.in_(WATCH_DATASETS),
-                DataPoint.indicator == old_name)):
-            dp.indicator = new_name
-            dp.key_hash = key_hash_for(dp.dataset, new_name, dp.country, dp.period,
-                                       dims_to_json(dp.dims))
-        session.execute(update(Indicator).where(
-            Indicator.source_id == t.source_id, Indicator.code == old_name
-        ).values(code=new_name, name=new_name))
-        t.kpi_name = new_name
-    if body.enabled is not None and body.enabled != t.enabled:
-        if not body.enabled:
-            _delete_points(session, t.source_id, t.kpi_name)
-            t.needs_baseline = True
-        t.enabled = body.enabled
-    for f in ("kind", "selector", "use_browser"):
-        if f in body.model_fields_set and getattr(body, f) is not None:
-            setattr(t, f, getattr(body, f))
-    if "selector" in body.model_fields_set and body.selector is None:
-        t.selector = None
     try:
+        if new_url != t.url:
+            _delete_points(session, t.source_id, old_name)  # a new link is a new baseline
+            t.url, t.needs_baseline = new_url, True
+            t.last_status, t.last_checked_at, t.last_error = "never", None, None
+        if new_name != old_name:
+            # a stale indicator of a deleted KPI may hold the new code (no target uses it,
+            # _conflict checked that)
+            session.execute(delete(Indicator).where(
+                Indicator.source_id == t.source_id, Indicator.code == new_name))
+            # indicator is part of key_hash, so the hash is recomputed (same formula as canonical)
+            for dp in session.scalars(select(DataPoint).where(
+                    DataPoint.source_id == t.source_id, DataPoint.dataset.in_(WATCH_DATASETS),
+                    DataPoint.indicator == old_name)):
+                dp.indicator = new_name
+                dp.key_hash = key_hash_for(dp.dataset, new_name, dp.country, dp.period,
+                                           dims_to_json(dp.dims))
+            session.execute(update(Indicator).where(
+                Indicator.source_id == t.source_id, Indicator.code == old_name
+            ).values(code=new_name, name=new_name))
+            t.kpi_name = new_name
+        if body.enabled is not None and body.enabled != t.enabled:
+            if not body.enabled:
+                _delete_points(session, t.source_id, t.kpi_name)
+                t.needs_baseline = True
+            t.enabled = body.enabled
+        for f in ("kind", "use_browser"):
+            if f in body.model_fields_set and getattr(body, f) is not None:
+                setattr(t, f, getattr(body, f))
+        if "selector" in body.model_fields_set:
+            t.selector = body.selector or None
         session.commit()
     except IntegrityError:
         session.rollback()
         raise HTTPException(409, "conflicting KPI") from None
-    return _target_json(t)
 
 
 @router.delete("/watch-targets/{target_id}", status_code=204)
 def delete_target(target_id: int, session: Session = Depends(get_session)):
     t = _target_or_404(session, target_id)
-    _delete_points(session, t.source_id, t.kpi_name)
-    session.delete(t)
-    session.commit()
+    with _source_lock(session, t.source_id):
+        session.refresh(t)
+        _delete_points(session, t.source_id, t.kpi_name)
+        session.execute(delete(Indicator).where(
+            Indicator.source_id == t.source_id, Indicator.code == t.kpi_name))
+        session.delete(t)
+        session.commit()
 
 
 @router.post("/watch-targets/test")
@@ -333,6 +369,14 @@ def import_confirm(body: ConfirmIn, session: Session = Depends(get_session)):
     if datetime.now(timezone.utc) - created_at > PREVIEW_TTL:
         session.commit()
         raise HTTPException(410, "import preview expired")
+    try:
+        return _confirm_rows(session, rows)
+    except IntegrityError:
+        session.rollback()
+        raise HTTPException(409, "import conflicts with existing sources, try again") from None
+
+
+def _confirm_rows(session: Session, rows: list[dict]) -> dict:
     created_sources = created_targets = skipped = 0
     for r in rows:
         if r["status"] not in ("new_source", "existing_source"):

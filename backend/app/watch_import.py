@@ -27,8 +27,10 @@ def _cell(v) -> str:
 def _xlsx_rows(data: bytes) -> list[list]:
     try:
         wb = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True)
-        ws = wb.worksheets[0]
-        return [list(r) for r in ws.iter_rows(values_only=True)]
+        try:
+            return [list(r) for r in wb.worksheets[0].iter_rows(values_only=True)]
+        finally:
+            wb.close()
     except Exception as e:  # noqa: BLE001 - any parser failure is a bad upload
         raise SheetError("unreadable Excel file") from e
 
@@ -40,7 +42,10 @@ def _csv_rows(data: bytes) -> list[list]:
         text = data.decode("latin-1")
     first = text.split("\n", 1)[0]
     delim = max(",;\t", key=first.count) if any(d in first for d in ",;\t") else ","
-    return [list(r) for r in csv.reader(io.StringIO(text), delimiter=delim)]
+    try:
+        return [list(r) for r in csv.reader(io.StringIO(text), delimiter=delim)]
+    except csv.Error as e:
+        raise SheetError("unreadable CSV file") from e
 
 
 def parse_sheet(filename: str, data: bytes) -> list[dict]:

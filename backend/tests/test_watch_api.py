@@ -22,8 +22,14 @@ AUTH = ("anyone", "secret")
 @pytest.fixture(autouse=True)
 def no_throttle(monkeypatch):
     monkeypatch.setattr(fetch_mod, "MIN_INTERVAL", 0.0)
-    monkeypatch.setattr(fetch_mod.socket, "getaddrinfo",
-                        lambda host, *a, **k: [(2, 1, 6, "", ("93.184.216.34", 0))])
+    real = fetch_mod.socket.getaddrinfo
+
+    def fake(host, *a, **k):
+        if host in ("localhost", "127.0.0.1"):  # the test DB
+            return real(host, *a, **k)
+        return [(2, 1, 6, "", ("93.184.216.34", 0))]
+
+    monkeypatch.setattr(fetch_mod.socket, "getaddrinfo", fake)
 
 
 @pytest.fixture
@@ -308,3 +314,66 @@ def test_url_change_is_new_baseline(history, db_session, session_factory):
     assert db_session.scalars(select(Change)).all() == []
     assert r.status in ("no_change", "baseline") and (r.added, r.altered, r.removed) == (0, 0, 0)
     assert [d.indicator for d in db_session.scalars(select(DataPoint))] == ["Price"]
+
+
+# --- review fixes ---------------------------------------------------------------
+
+def test_mutations_409_while_source_running(client, db_session, held_lock):
+    tid = create(client).json()["id"]
+    sid = db_session.scalars(select(Source.id)).one()
+    held_lock(sid)
+    for resp in (client.patch(f"/api/watch-targets/{tid}", json={"kpi_name": "New"}),
+                 client.patch(f"/api/watch-targets/{tid}", json={"enabled": False}),
+                 client.patch(f"/api/watch-targets/{tid}", json={"url": "https://h.example/z"}),
+                 client.delete(f"/api/watch-targets/{tid}")):
+        assert resp.status_code == 409 and resp.json()["detail"] == "source is running, try again"
+    t = db_session.get(WatchTarget, tid)
+    db_session.refresh(t)
+    assert (t.kpi_name, t.url, t.enabled) == ("Price", "https://h.example/p", True)
+    # harmless edits are not blocked
+    assert client.patch(f"/api/watch-targets/{tid}", json={"selector": "main"}).status_code == 200
+
+
+def test_rename_into_deleted_kpi_name(client, db_session, session_factory):
+    a = create(client, kpi="A", url="https://h.example/a").json()["id"]
+    b = create(client, kpi="B", url="https://h.example/b").json()["id"]
+    with respx.mock:
+        serve({"a": "1", "b": "2"})
+        pipeline.run_source(session_factory, "custom-acme")
+    assert client.delete(f"/api/watch-targets/{a}").status_code == 204
+    sid = db_session.scalars(select(Source.id)).one()
+    assert [i.code for i in db_session.scalars(select(Indicator).where(Indicator.source_id == sid))] == ["B"]
+    # a stale indicator left by older code must not break the rename either
+    db_session.add(Indicator(source_id=sid, code="A", name="A"))
+    db_session.flush()
+    assert client.patch(f"/api/watch-targets/{b}", json={"kpi_name": "A"}).status_code == 200
+    assert [i.code for i in db_session.scalars(select(Indicator).where(Indicator.source_id == sid))] == ["A"]
+
+
+def test_conflict_is_case_insensitive(client):
+    create(client)
+    assert create(client, kpi="PRICE", url="https://h.example/other").status_code == 409
+
+
+def test_held_run_keeps_needs_baseline_and_approve_clears(client, db_session, session_factory, monkeypatch):
+    monkeypatch.setattr(get_settings(), "suspect_removal_ratio", 0.0)
+    create(client, kpi="Old", url="https://h.example/old")
+    with respx.mock:
+        serve({"old": "v1"})
+        assert pipeline.run_source(session_factory, "custom-acme").status == "baseline"
+    new = create(client, kpi="New", url="https://h.example/new").json()["id"]
+    gone = db_session.scalars(select(WatchTarget.id).where(WatchTarget.kpi_name == "Old")).one()
+    # Old disappears from the fetch (disabled in DB is silent, so force a removal via a changed page
+    # plus force_hold instead)
+    with respx.mock:
+        serve({"old": "v2", "new": "n"})
+        held = pipeline.run_source(session_factory, "custom-acme", force_hold=True)
+    assert held.status == "suspect_pending"
+    t = db_session.get(WatchTarget, new)
+    db_session.refresh(t)
+    assert t.needs_baseline is True
+    pipeline.approve_run(session_factory, held.id)
+    db_session.refresh(t)
+    assert t.needs_baseline is False
+    assert {c.indicator for c in db_session.scalars(select(Change))} == {"Old"}
+    assert gone  # silence unused

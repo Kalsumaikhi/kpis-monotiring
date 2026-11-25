@@ -111,3 +111,30 @@ def test_200k_rows_under_30s(db_session, source, run):
     assert res.altered == 20_000 and res.added == 0 and res.removed == 0
     assert elapsed < 30
     assert db_session.scalar(select(func.count()).select_from(Change)) == 20_000
+
+
+def _ind(indicator, period, value):
+    return to_canonical(RawRow("d", indicator, "", period, value))
+
+
+def test_exclude_indicators_not_counted_but_applied(db_session, source, run):
+    from app.models import PendingChange
+    seed(db_session, source, [_ind("A", "1", 1), _ind("B", "1", 1), _ind("C", "1", 1)])
+    stage_rows(db_session, [_ind("A", "1", 2), _ind("B", "1", 2), _ind("N", "1", 5)])
+    d = compute_diff(db_session, source.id, complete=True, exclude_indicators=["B", "N", "C"])
+    assert d == DiffResult(existing=1, total=3, added=0, altered=1, removed=0)
+    apply_diff(db_session, source.id, run.id, complete=True, record_changes=True,
+               exclude_indicators=["B", "N", "C"])
+    assert [(c.indicator, c.change_type) for c in db_session.scalars(select(Change))] == [("A", "altered")]
+    pts = {p.indicator: p.value_num for p in db_session.scalars(select(DataPoint))}
+    assert pts == {"A": Decimal("2"), "B": Decimal("2"), "N": Decimal("5")}  # C absent -> deleted
+    assert db_session.scalars(select(PendingChange)).all() == []
+
+
+def test_record_pending_excludes_indicators(db_session, source, run):
+    from app.core.diff import record_pending
+    from app.models import PendingChange
+    seed(db_session, source, [_ind("A", "1", 1), _ind("B", "1", 1)])
+    stage_rows(db_session, [_ind("A", "1", 2), _ind("B", "1", 2), _ind("N", "1", 5)])
+    record_pending(db_session, source.id, run.id, True, ["B", "N"])
+    assert [(p.indicator, p.change_type) for p in db_session.scalars(select(PendingChange))] == [("A", "altered")]

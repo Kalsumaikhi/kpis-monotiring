@@ -388,6 +388,7 @@ def approve_run(session_factory: SessionFactory, run_id: int, notifier: Notifier
         except Exception:
             session.rollback()
             raise
+        _after_run(session, connector, run)  # e.g. watch targets are baselined once applied
         _notify(session, run, notifier)
         return _detach(session, run)
     finally:

@@ -100,7 +100,8 @@ def compute_diff(session: Session, source_id: int, complete: bool,
         text(
             """
             SELECT
-              (SELECT count(*) FROM data_points WHERE source_id = :sid) AS existing,
+              (SELECT count(*) FROM data_points WHERE source_id = :sid
+                  AND NOT (indicator = ANY(CAST(:excl AS text[])))) AS existing,
               (SELECT count(*) FROM staging) AS total,
               (SELECT count(*) FROM staging s WHERE NOT EXISTS (
                   SELECT 1 FROM data_points d
@@ -191,6 +192,8 @@ def apply_diff(
         params,
     )
     if complete:
+        # Excluded (baseline) indicators are deleted too when absent from the fetch: they are
+        # intentionally not counted or recorded as changes.
         session.execute(
             text(
                 """

@@ -171,7 +171,9 @@ class WatchConnector:
             target.last_checked_at = now
             target.last_error = t.get("error")
             if snapshots and t["status"] == "ok":
-                if target.url == t["url"]:  # not re-pointed since the download
+                # A held (suspect_pending) run stored nothing, so the KPI is not baselined yet;
+                # approve_run calls this hook again once the data is applied.
+                if target.url == t["url"] and run.status in ("ok", "no_change", "baseline"):  # not re-pointed since the download
                     target.needs_baseline = False
                 self._snapshot(session, run, t)
                 ids = session.scalars(
