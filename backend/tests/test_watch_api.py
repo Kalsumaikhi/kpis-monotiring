@@ -1,0 +1,310 @@
+import io
+from datetime import datetime, timedelta, timezone
+
+import httpx
+import openpyxl
+import pytest
+import respx
+from fastapi.testclient import TestClient
+from sqlalchemy import select
+
+from app import watch_import
+from app.api import deps
+from app.api.main import create_app
+from app.config import get_settings
+from app.connectors.watch import fetch as fetch_mod
+from app.core import pipeline
+from app.models import Change, DataPoint, ImportPreview, Indicator, Run, Source, WatchTarget
+
+AUTH = ("anyone", "secret")
+
+
+@pytest.fixture(autouse=True)
+def no_throttle(monkeypatch):
+    monkeypatch.setattr(fetch_mod, "MIN_INTERVAL", 0.0)
+    monkeypatch.setattr(fetch_mod.socket, "getaddrinfo",
+                        lambda host, *a, **k: [(2, 1, 6, "", ("93.184.216.34", 0))])
+
+
+@pytest.fixture
+def client(db_session, session_factory, monkeypatch):
+    monkeypatch.setattr(get_settings(), "dashboard_password", "secret")
+    app = create_app()
+    app.dependency_overrides[deps.get_session] = lambda: db_session
+    app.dependency_overrides[deps.get_session_factory] = lambda: session_factory
+    c = TestClient(app)
+    c.auth = AUTH
+    return c
+
+
+def create(client, source="Acme", kpi="Price", url="https://h.example/p", **extra):
+    return client.post("/api/custom-sources",
+                       json={"source_name": source, "kpi_name": kpi, "url": url, **extra})
+
+
+def xlsx(rows, header=("source  NAME", "kpi name", "Link ")):
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(list(header))
+    for r in rows:
+        ws.append(list(r))
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+XLSX = ("sheet.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+
+def upload(client, name, data, ctype="application/octet-stream"):
+    return client.post("/api/watch-targets/import/preview", files={"file": (name, data, ctype)})
+
+
+def serve(pages):
+    respx.get("https://h.example/robots.txt").mock(return_value=httpx.Response(404))
+    for path, body in pages.items():
+        respx.get(f"https://h.example/{path}").mock(
+            return_value=httpx.Response(200, text=f"<main><p>{body}</p></main>",
+                                        headers={"content-type": "text/html"}))
+
+
+# --- CRUD ---------------------------------------------------------------------
+
+def test_create_target_creates_source_and_slug(client, db_session):
+    r = create(client)
+    assert r.status_code == 201
+    body = r.json()
+    assert body["kpi_name"] == "Price" and body["url"] == "https://h.example/p"
+    src = db_session.scalars(select(Source).where(Source.name == "Acme")).one()
+    assert src.slug == "custom-acme" and src.area == "custom" and src.access == "watch"
+    # second KPI joins the same source; a differently named source with a clashing slug gets a suffix
+    assert create(client, kpi="Other", url="https://h.example/o").status_code == 201
+    assert db_session.scalars(select(Source).where(Source.name == "Acme")).all() == [src]
+    assert create(client, source="Acme!", kpi="X", url="https://h.example/x").status_code == 201
+    slugs = sorted(s.slug for s in db_session.scalars(select(Source).where(Source.area == "custom")))
+    assert slugs == ["custom-acme", "custom-acme-2"]
+    listing = client.get("/api/custom-sources").json()
+    acme = next(s for s in listing if s["slug"] == "custom-acme")
+    assert {"slug", "name", "enabled", "cron", "targets"} <= set(acme)
+    assert len(acme["targets"]) == 2 and "noisy" in acme["targets"][0]
+
+
+def test_create_target_rejects_bad_url_and_duplicate(client):
+    assert create(client, url="ftp://x/y").status_code == 422
+    assert create(client, url="not a url").status_code == 422
+    assert create(client, source="  ").status_code == 422
+    assert create(client, kpi="").status_code == 422
+    assert create(client).status_code == 201
+    assert create(client, kpi="Another").status_code == 409  # same source + url
+    assert create(client, url="https://h.example/q").status_code == 409  # same kpi name
+
+
+def test_requires_auth(client):
+    assert client.get("/api/custom-sources", auth=None).status_code == 401
+
+
+def test_delete_target_no_removed_changes(client, db_session, session_factory):
+    tid = create(client).json()["id"]
+    create(client, kpi="Two", url="https://h.example/two")
+    with respx.mock:
+        serve({"p": "v1", "two": "x"})
+        pipeline.run_source(session_factory, "custom-acme")
+    assert db_session.scalars(select(DataPoint)).all()
+    assert client.delete(f"/api/watch-targets/{tid}").status_code == 204
+    pts = db_session.scalars(select(DataPoint.indicator)).all()
+    assert pts == ["Two"]
+    assert db_session.scalars(select(Change)).all() == []
+    assert client.delete(f"/api/watch-targets/{tid}").status_code == 404
+
+
+def test_delete_last_target_keeps_source(client, db_session):
+    tid = create(client).json()["id"]
+    assert client.delete(f"/api/watch-targets/{tid}").status_code == 204
+    assert db_session.scalars(select(Source).where(Source.slug == "custom-acme")).one()
+    s = next(s for s in client.get("/api/custom-sources").json() if s["slug"] == "custom-acme")
+    assert s["targets"] == []
+
+
+def test_patch_validation_and_conflicts(client):
+    a = create(client).json()["id"]
+    create(client, kpi="B", url="https://h.example/b")
+    assert client.patch(f"/api/watch-targets/{a}", json={"kpi_name": "B"}).status_code == 409
+    assert client.patch(f"/api/watch-targets/{a}", json={"url": "https://h.example/b"}).status_code == 409
+    assert client.patch(f"/api/watch-targets/{a}", json={"url": "ftp://x"}).status_code == 422
+    assert client.patch(f"/api/watch-targets/{a}", json={"kind": "bogus"}).status_code == 422
+    assert client.patch("/api/watch-targets/99999", json={"enabled": False}).status_code == 404
+    r = client.patch(f"/api/watch-targets/{a}", json={"selector": "main", "use_browser": True})
+    assert r.status_code == 200 and r.json()["selector"] == "main" and r.json()["use_browser"] is True
+
+
+# --- test link ------------------------------------------------------------------
+
+@respx.mock
+def test_test_link_page_and_json(client):
+    respx.get("https://h.example/robots.txt").mock(return_value=httpx.Response(404))
+    respx.get("https://h.example/page").mock(return_value=httpx.Response(
+        200, text="<main><p>" + "word " * 1000 + "</p></main>", headers={"content-type": "text/html"}))
+    respx.get("https://h.example/data").mock(return_value=httpx.Response(
+        200, json={"a": {"b": 1}, "c": [1, 2]}, headers={"content-type": "application/json"}))
+    r = client.post("/api/watch-targets/test", json={"url": "https://h.example/page"}).json()
+    assert r["status"] == "ok" and r["kind"] == "page" and 0 < len(r["text_preview"]) <= 2000
+    r = client.post("/api/watch-targets/test", json={"url": "https://h.example/data"}).json()
+    assert r["status"] == "ok" and r["kind"] == "api"
+    assert {"path": "a.b", "value": "1"} in r["json_preview"]
+    bad = client.post("/api/watch-targets/test", json={"url": "ftp://x"})
+    assert bad.status_code == 422
+
+
+@respx.mock
+def test_test_link_reports_errors_and_writes_nothing(client, db_session):
+    respx.get("https://h.example/robots.txt").mock(return_value=httpx.Response(404))
+    respx.get("https://h.example/x").mock(return_value=httpx.Response(500))
+    r = client.post("/api/watch-targets/test", json={"url": "https://h.example/x"}).json()
+    assert r["status"] == "error" and r["error"]
+    assert db_session.scalars(select(Source)).all() == []
+
+
+# --- import ---------------------------------------------------------------------
+
+def test_import_preview_messy_sheet(client, db_session):
+    data = xlsx([
+        ("Acme", "Price", "https://h.example/p"),
+        (None, None, None),
+        ("Acme", "Price", "https://h.example/p"),
+        ("Acme", "Bad", "ftp://x"),
+    ])
+    r = upload(client, "k.xlsx", data)
+    assert r.status_code == 200
+    body = r.json()
+    assert [x["status"] for x in body["rows"]] == ["new_source", "duplicate", "invalid"]
+    assert [x["row"] for x in body["rows"]] == [2, 4, 5]
+    assert body["rows"][2]["error"]
+    assert db_session.get(ImportPreview, body["token"]) is not None
+
+
+def test_import_existing_source_and_existing_duplicate(client):
+    create(client)
+    data = xlsx([("Acme", "New", "https://h.example/n"), ("Acme", "Dup", "https://h.example/p"),
+                 ("Acme", "Price", "https://h.example/z")])
+    st = [x["status"] for x in upload(client, "k.xlsx", data).json()["rows"]]
+    assert st == ["existing_source", "duplicate", "duplicate"]  # last: kpi name taken
+
+
+def test_import_missing_column_422(client):
+    data = xlsx([("a", "b")], header=("Source name", "KPI name"))
+    r = upload(client, "k.xlsx", data)
+    assert r.status_code == 422 and r.json()["detail"] == "missing column: Link"
+
+
+def test_import_rejects_unknown_type_and_big_file(client):
+    assert upload(client, "k.txt", b"x").status_code == 422
+    r = upload(client, "k.csv", b"a" * (2 * 1024 * 1024 + 1))
+    assert r.status_code == 413
+
+
+def test_import_confirm_creates_and_token_single_use(client, db_session):
+    create(client)
+    data = xlsx([("Acme", "New", "https://h.example/n"), ("Fresh", "F1", "https://h.example/f1"),
+                 ("Fresh", "F2", "https://h.example/f2"), ("Acme", "Price", "https://h.example/p"),
+                 ("Acme", "Bad", "ftp://x")])
+    tok = upload(client, "k.xlsx", data).json()["token"]
+    r = client.post("/api/watch-targets/import/confirm", json={"token": tok})
+    assert r.status_code == 200
+    assert r.json() == {"created_sources": 1, "created_targets": 3, "skipped": 2}
+    assert db_session.scalars(select(Source).where(Source.slug == "custom-fresh")).one()
+    assert client.post("/api/watch-targets/import/confirm", json={"token": tok}).status_code == 410
+    assert client.post("/api/watch-targets/import/confirm", json={"token": "nope"}).status_code == 410
+
+
+def test_import_confirm_expired_token(client, db_session):
+    data = xlsx([("Acme", "Price", "https://h.example/p")])
+    tok = upload(client, "k.xlsx", data).json()["token"]
+    pv = db_session.get(ImportPreview, tok)
+    pv.created_at = datetime.now(timezone.utc) - timedelta(hours=2)
+    db_session.flush()
+    assert client.post("/api/watch-targets/import/confirm", json={"token": tok}).status_code == 410
+
+
+def test_import_csv(client):
+    csv = ("﻿Source Name;KPI  name;LINK\r\n"
+           "Acme;Price;https://h.example/p\r\n;;\r\nAcme;Stock;https://h.example/s\r\n").encode("utf-8")
+    r = upload(client, "k.csv", csv)
+    assert r.status_code == 200
+    assert [x["kpi_name"] for x in r.json()["rows"]] == ["Price", "Stock"]
+    assert [x["row"] for x in r.json()["rows"]] == [2, 4]
+    comma = b"source name,kpi name,link\nA,K,https://x.example/\n"
+    assert upload(client, "k.csv", comma).json()["rows"][0]["status"] == "new_source"
+
+
+def test_parse_sheet_unit():
+    rows = watch_import.parse_sheet("a.csv", b"Source name,KPI name,Link\nA,K,https://x/\n")
+    assert rows == [{"row": 2, "source_name": "A", "kpi_name": "K", "url": "https://x/"}]
+
+
+# --- R9: baselines --------------------------------------------------------------
+
+@pytest.fixture
+def history(client, db_session, session_factory):
+    """Source 'Acme' with one KPI that already has a baseline run."""
+    create(client)
+    with respx.mock:
+        serve({"p": "v1"})
+        assert pipeline.run_source(session_factory, "custom-acme").status == "baseline"
+    return client
+
+
+def run(session_factory, pages):
+    with respx.mock:
+        serve(pages)
+        return pipeline.run_source(session_factory, "custom-acme")
+
+
+def test_new_kpis_do_not_alert_on_first_fetch(history, db_session, session_factory):
+    data = xlsx([("Acme", f"K{i}", f"https://h.example/k{i}") for i in range(3)])
+    tok = upload(history, "k.xlsx", data).json()["token"]
+    history.post("/api/watch-targets/import/confirm", json={"token": tok})
+    pages = {"p": "v1", "k0": "a", "k1": "b", "k2": "c"}
+    r1 = run(session_factory, pages)
+    assert r1.status == "no_change" and (r1.added, r1.altered, r1.removed) == (0, 0, 0)
+    assert db_session.scalars(select(Change)).all() == []
+    assert {d.indicator for d in db_session.scalars(select(DataPoint))} == {"Price", "K0", "K1", "K2"}
+    pages["k1"] = "changed"
+    r2 = run(session_factory, pages)
+    assert r2.status == "ok" and r2.altered == 1 and r2.added == 0
+    t = db_session.scalars(select(WatchTarget).where(WatchTarget.kpi_name == "K0")).one()
+    assert t.needs_baseline is False
+
+
+def test_disable_deletes_points_silently_and_reenable_rebaselines(history, db_session, session_factory):
+    tid = db_session.scalars(select(WatchTarget.id)).one()
+    create(history, kpi="Keep", url="https://h.example/keep")
+    run(session_factory, {"p": "v1", "keep": "k"})
+    assert history.patch(f"/api/watch-targets/{tid}", json={"enabled": False}).status_code == 200
+    assert {d.indicator for d in db_session.scalars(select(DataPoint))} == {"Keep"}
+    r = run(session_factory, {"p": "v1", "keep": "k"})
+    assert r.removed == 0 and db_session.scalars(select(Change)).all() == []
+    assert history.patch(f"/api/watch-targets/{tid}", json={"enabled": True}).status_code == 200
+    r = run(session_factory, {"p": "v9", "keep": "k"})
+    assert r.status == "no_change" and db_session.scalars(select(Change)).all() == []
+
+
+def test_rename_is_silent(history, db_session, session_factory):
+    tid = db_session.scalars(select(WatchTarget.id)).one()
+    assert history.patch(f"/api/watch-targets/{tid}", json={"kpi_name": "Cost"}).status_code == 200
+    r = run(session_factory, {"p": "v1"})
+    assert r.status == "no_change"
+    assert db_session.scalars(select(Change)).all() == []
+    assert [d.indicator for d in db_session.scalars(select(DataPoint))] == ["Cost"]
+    ind = db_session.scalars(select(Indicator).where(Indicator.source_id == db_session.scalars(
+        select(Source.id).where(Source.slug == "custom-acme")).one())).all()
+    assert [(i.code, i.name) for i in ind] == [("Cost", "Cost")]
+
+
+def test_url_change_is_new_baseline(history, db_session, session_factory):
+    tid = db_session.scalars(select(WatchTarget.id)).one()
+    assert history.patch(f"/api/watch-targets/{tid}", json={"url": "https://h.example/q"}).status_code == 200
+    assert db_session.scalars(select(DataPoint)).all() == []
+    r = run(session_factory, {"q": "other"})
+    assert db_session.scalars(select(Change)).all() == []
+    assert r.status in ("no_change", "baseline") and (r.added, r.altered, r.removed) == (0, 0, 0)
+    assert [d.indicator for d in db_session.scalars(select(DataPoint))] == ["Price"]

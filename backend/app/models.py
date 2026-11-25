@@ -159,6 +159,7 @@ class WatchTarget(Base):
     last_status: Mapped[str] = mapped_column(Text, server_default="never")
     last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_error: Mapped[str | None] = mapped_column(Text)
+    needs_baseline: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))
     created_at: Mapped[datetime] = _now()
 
 

@@ -10,7 +10,7 @@ ON COMMIT DROP, so a commit between them loses the staged rows.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable
+from typing import Iterable, Sequence
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -93,7 +93,9 @@ def stage_rows(session: Session, rows: Iterable[CanonicalRow]) -> int:
     return session.execute(text("SELECT count(*) FROM staging")).scalar_one()
 
 
-def compute_diff(session: Session, source_id: int, complete: bool) -> DiffResult:
+def compute_diff(session: Session, source_id: int, complete: bool,
+                 exclude_indicators: Sequence[str] = ()) -> DiffResult:
+    """Counts staging vs data_points; rows of `exclude_indicators` are not counted."""
     row = session.execute(
         text(
             """
@@ -102,21 +104,25 @@ def compute_diff(session: Session, source_id: int, complete: bool) -> DiffResult
               (SELECT count(*) FROM staging) AS total,
               (SELECT count(*) FROM staging s WHERE NOT EXISTS (
                   SELECT 1 FROM data_points d
-                  WHERE d.source_id = :sid AND d.key_hash = s.key_hash)) AS added,
+                  WHERE d.source_id = :sid AND d.key_hash = s.key_hash)
+                  AND NOT (s.indicator = ANY(CAST(:excl AS text[])))) AS added,
               (SELECT count(*) FROM staging s JOIN data_points d
                   ON d.source_id = :sid AND d.key_hash = s.key_hash
-                  WHERE d.value_hash <> s.value_hash) AS altered,
+                  WHERE d.value_hash <> s.value_hash
+                    AND NOT (s.indicator = ANY(CAST(:excl AS text[])))) AS altered,
               (SELECT CASE WHEN :complete THEN count(*) ELSE 0 END
                   FROM data_points d WHERE d.source_id = :sid AND NOT EXISTS (
-                  SELECT 1 FROM staging s WHERE s.key_hash = d.key_hash)) AS removed
+                  SELECT 1 FROM staging s WHERE s.key_hash = d.key_hash)
+                  AND NOT (d.indicator = ANY(CAST(:excl AS text[])))) AS removed
             """
         ),
-        {"sid": source_id, "complete": complete},
+        {"sid": source_id, "complete": complete, "excl": list(exclude_indicators)},
     ).one()
     return DiffResult(*row)
 
 
-def _insert_changes(table: str, session: Session, source_id: int, run_id: int, complete: bool) -> None:
+def _insert_changes(table: str, session: Session, source_id: int, run_id: int, complete: bool,
+                    exclude_indicators: Sequence[str] = ()) -> None:
     """Insert the would-be changes (staging vs data_points) into `table`; never touches data_points."""
     removed_clause = "OR s.key_hash IS NULL" if complete else ""
     session.execute(
@@ -134,25 +140,30 @@ def _insert_changes(table: str, session: Session, source_id: int, run_id: int, c
             FROM staging s
             FULL OUTER JOIN (SELECT * FROM data_points WHERE source_id = :sid) d
                 ON d.key_hash = s.key_hash
-            WHERE d.key_hash IS NULL OR s.value_hash <> d.value_hash {removed_clause}
+            WHERE (d.key_hash IS NULL OR s.value_hash <> d.value_hash {removed_clause})
+              AND NOT (COALESCE(s.indicator, d.indicator) = ANY(CAST(:excl AS text[])))
             """
         ),
-        {"sid": source_id, "rid": run_id},
+        {"sid": source_id, "rid": run_id, "excl": list(exclude_indicators)},
     )
 
 
-def record_pending(session: Session, source_id: int, run_id: int, complete: bool) -> None:
+def record_pending(session: Session, source_id: int, run_id: int, complete: bool,
+                   exclude_indicators: Sequence[str] = ()) -> None:
     """Store a held run's would-be changes in pending_changes (data_points untouched)."""
-    _insert_changes("pending_changes", session, source_id, run_id, complete)
+    _insert_changes("pending_changes", session, source_id, run_id, complete, exclude_indicators)
 
 
 def apply_diff(
-    session: Session, source_id: int, run_id: int, complete: bool, record_changes: bool
+    session: Session, source_id: int, run_id: int, complete: bool, record_changes: bool,
+    exclude_indicators: Sequence[str] = (),
 ) -> None:
+    """Apply staging to data_points. Rows of `exclude_indicators` are still upserted but
+    never produce changes rows."""
     params = {"sid": source_id, "rid": run_id}
     # Order matters: changes read old values, so they go in before data_points is touched.
     if record_changes:
-        _insert_changes("changes", session, source_id, run_id, complete)
+        _insert_changes("changes", session, source_id, run_id, complete, exclude_indicators)
     session.execute(
         text(
             """

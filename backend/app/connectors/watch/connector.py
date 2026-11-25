@@ -53,7 +53,7 @@ def _decode(body: bytes, ctype: str) -> str:
 
 def _entry(t: dict, status: str, ctype: str = "", error: str | None = None, **extra) -> dict:
     return {"id": t["id"], "kpi_name": t["kpi_name"], "url": t["url"], "kind": t["kind"],
-            "status": status, "content_type": ctype, "error": error, **extra}
+            "needs_baseline": t.get("needs_baseline", False), "status": status, "content_type": ctype, "error": error, **extra}
 
 
 def _process(t: dict, res) -> dict:
@@ -98,7 +98,8 @@ class WatchConnector:
         with self.session_factory() as session:  # short session, closed before any network I/O
             targets = [
                 {"id": t.id, "kpi_name": t.kpi_name, "url": t.url, "kind": t.kind,
-                 "selector": t.selector, "use_browser": t.use_browser}
+                 "selector": t.selector, "use_browser": t.use_browser,
+                 "needs_baseline": t.needs_baseline}
                 for t in session.scalars(
                     select(WatchTarget)
                     .where(WatchTarget.source_id == self.source_id, WatchTarget.enabled.is_(True))
@@ -141,6 +142,7 @@ class WatchConnector:
             indicators=[IndicatorMeta(code=t["kpi_name"], name=t["kpi_name"]) for t in targets],
             vintage=None,
             warnings=warnings,
+            baseline_indicators=[t["kpi_name"] for t in targets if t.get("needs_baseline")],
         )
 
     def on_failed(self, session, run) -> None:
@@ -169,6 +171,8 @@ class WatchConnector:
             target.last_checked_at = now
             target.last_error = t.get("error")
             if snapshots and t["status"] == "ok":
+                if target.url == t["url"]:  # not re-pointed since the download
+                    target.needs_baseline = False
                 self._snapshot(session, run, t)
                 ids = session.scalars(
                     select(WatchSnapshot.id).where(WatchSnapshot.target_id == target.id)

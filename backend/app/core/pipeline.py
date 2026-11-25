@@ -303,8 +303,9 @@ def run_source(
 
         try:
             parsed = connector.parse(dest)
+            excl = parsed.baseline_indicators
             stage_rows(session, _canonical_rows(parsed.rows))
-            diff = compute_diff(session, source.id, parsed.complete)
+            diff = compute_diff(session, source.id, parsed.complete, excl)
             has_history = session.scalar(
                 select(
                     select(DataPoint.id).where(DataPoint.source_id == source.id).exists()
@@ -324,11 +325,15 @@ def run_source(
             ):
                 status = "suspect_pending"
                 _supersede_held(session, source.id, except_id=run_id)
-                record_pending(session, source.id, run_id, parsed.complete)
+                record_pending(session, source.id, run_id, parsed.complete, excl)
             elif diff.added + diff.altered + diff.removed == 0:
                 status = "no_change"
+                if excl:  # silent baseline rows still need storing
+                    apply_diff(session, source.id, run_id, parsed.complete, record_changes=False,
+                               exclude_indicators=excl)
             else:
-                apply_diff(session, source.id, run_id, parsed.complete, record_changes=True)
+                apply_diff(session, source.id, run_id, parsed.complete, record_changes=True,
+                           exclude_indicators=excl)
                 status = "ok"
             _finish(session, run, status, diff, parsed.indicators, parsed.vintage, parsed.warnings)
         except Exception as e:  # noqa: BLE001
@@ -372,8 +377,9 @@ def approve_run(session_factory: SessionFactory, run_id: int, notifier: Notifier
         try:
             parsed = connector.parse(Path(run.raw_path))
             stage_rows(session, _canonical_rows(parsed.rows))
-            diff = compute_diff(session, source.id, parsed.complete)
-            apply_diff(session, source.id, run.id, parsed.complete, record_changes=True)
+            diff = compute_diff(session, source.id, parsed.complete, parsed.baseline_indicators)
+            apply_diff(session, source.id, run.id, parsed.complete, record_changes=True,
+                       exclude_indicators=parsed.baseline_indicators)
             run.trigger = "approve"
             run.error = None
             # The raw file is the single source of truth: changes were just recorded from it.
