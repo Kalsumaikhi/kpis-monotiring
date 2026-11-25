@@ -52,10 +52,13 @@ Run from `backend/` (or `docker compose exec worker ...`):
 python -m app.cli sync-sources                       # register the connectors in the DB
 python -m app.cli run <slug>                         # download, parse, diff, notify
 python -m app.cli run <slug> --from-raw <path>       # test-only: reprocess a local raw file
+python -m app.cli backfill-rollup                    # rebuild the change-frequency counts from all changes
 python -m app.worker                                 # scheduler
 ```
 
 `run` prints `slug: status rows=N added=N altered=N removed=N`. Exit codes: 1 failed, 2 bad arguments, 3 source busy. The first run of a source is a `baseline`; later runs report `no_change` or `ok`.
+
+The KPI frequency and explorer views read per-day counts from `change_rollup`. Migration `0006` fills it from existing changes when an older database is upgraded; `backfill-rollup` rebuilds it by hand (safe to repeat).
 
 ## API
 
