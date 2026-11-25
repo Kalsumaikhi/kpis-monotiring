@@ -19,14 +19,22 @@ const BASE = process.env.E2E_BASE_URL || 'http://localhost:8080'
 const PASSWORD = process.env.DASHBOARD_PASSWORD || 'dev'
 const PAGE_PORT = Number(process.env.E2E_KEYS_PORT || 8443)
 const CERT_DIR = process.env.E2E_KEYS_CERT_DIR // holds localhost.crt + localhost.key (see README)
-const RAW_DIR = process.env.RAW_DIR // optional: scanned for the secrets
-const MM_LOG = process.env.E2E_MM_LOG // optional: file the Mattermost stub appends bodies to
-const LOG_FILES = (process.env.E2E_LOG_FILES || '').split(',').filter(Boolean) // optional: api/worker logs
-const PSQL_URL = process.env.E2E_PSQL_URL // optional: plain postgresql:// URL, scanned with psql
+// All four are required so the leak scan always covers every place a secret could land.
+const RAW_DIR = process.env.RAW_DIR // the worker's raw files
+const MM_LOG = process.env.E2E_MM_LOG // file the Mattermost stub appends request bodies to
+const LOG_FILES = (process.env.E2E_LOG_FILES || '').split(',').filter(Boolean) // api and worker log files
+const PSQL_URL = process.env.E2E_PSQL_URL // plain postgresql:// URL, scanned with psql
 const SHOTS = process.env.E2E_SCREENSHOTS || fs.mkdtempSync(path.join(os.tmpdir(), 'kpi-e2e-keys-shots-'))
-if (!CERT_DIR) {
-  console.error('Set E2E_KEYS_CERT_DIR to a folder with localhost.crt and localhost.key (README, "Keys end-to-end test").')
+const missing = [
+  ['E2E_KEYS_CERT_DIR', CERT_DIR], ['RAW_DIR', RAW_DIR], ['E2E_MM_LOG', MM_LOG],
+  ['E2E_LOG_FILES', LOG_FILES.length], ['E2E_PSQL_URL', PSQL_URL],
+].filter(([, v]) => !v).map(([k]) => k)
+if (missing.length) {
+  console.error(`Missing required environment: ${missing.join(', ')}. See README, "Keys end-to-end test".`)
   process.exit(2)
+}
+for (const f of [path.join(CERT_DIR, 'localhost.crt'), RAW_DIR, MM_LOG, ...LOG_FILES]) {
+  if (!fs.existsSync(f)) { console.error(`Not found: ${f}`); process.exit(2) }
 }
 const RUN = Date.now().toString(36)
 const SRC = `E2E Keys ${RUN}`
@@ -61,7 +69,10 @@ const api = async (p, init = {}) => {
   return r.status === 204 ? null : r.json()
 }
 // Remove the KPI, the (now empty) source and the key this run created. Runs on success, failure and signals.
+let cleaned = false
 async function cleanup() {
+  if (cleaned) return
+  cleaned = true
   try {
     for (const s of await api('/api/custom-sources')) {
       if (s.name !== SRC) continue
@@ -119,10 +130,10 @@ function leakScan(secrets) {
     const buf = fs.readFileSync(f)
     for (const n of needles) if (buf.includes(n)) hits.push(f)
   }
-  if (RAW_DIR && fs.existsSync(RAW_DIR)) walk(RAW_DIR).forEach(scanFile)
-  if (MM_LOG && fs.existsSync(MM_LOG)) scanFile(MM_LOG)
-  LOG_FILES.filter((f) => fs.existsSync(f)).forEach(scanFile)
-  if (PSQL_URL) {
+  walk(RAW_DIR).forEach(scanFile)
+  scanFile(MM_LOG)
+  LOG_FILES.forEach(scanFile)
+  {
     const q = (sql) => execFileSync('psql', [PSQL_URL, '-At', '-c', sql], { encoding: 'utf8' }).trim()
     for (const n of needles) {
       const lit = "'%" + n.replace(/'/g, "''") + "%'"
@@ -191,11 +202,11 @@ try {
 
   // 4. Run now -> baseline
   await page.goto(BASE + '/')
+  const seenBefore = seen.length // everything after this index comes from the worker, not Test link
   await page.locator('li.source', { hasText: SRC }).getByRole('button', { name: 'Run now' }).click()
   const r1 = await waitFinished(slug, 0)
   assert.equal(r1.status, 'baseline', `first check is a silent baseline (got ${r1.status}: ${r1.error})`)
-  const seenBefore = seen.length
-  assert(seen.slice(0, seenBefore).filter((h) => h === SECRET_A).length >= 2, 'the worker request carried the header')
+  assert(seen.slice(seenBefore).includes(SECRET_A), 'the worker request carried the header')
   step(4, `Run now -> run #${r1.id} status=${r1.status}; stub saw the header on the worker fetch`)
   await page.goto(BASE + '/settings')
   await page.getByRole('region', { name: SRC }).locator('tbody tr', { hasText: 'Private pricing' }).getByText('OK', { exact: true }).waitFor({ timeout: 20000 })
@@ -207,9 +218,11 @@ try {
   await page.locator('form[aria-label]').getByRole('button', { name: 'Replace secret', exact: true }).click()
   await page.locator('#kf-secret').waitFor({ state: 'detached' })
   await page.goto(BASE + '/')
+  const seenBefore2 = seen.length
   await page.locator('li.source', { hasText: SRC }).getByRole('button', { name: 'Run now' }).click()
   const r2 = await waitFinished(slug, 1)
-  assert.ok(seen.includes(SECRET_B), 'the stub received the wrong secret')
+  const fresh = seen.slice(seenBefore2)
+  assert.ok(fresh.includes(SECRET_B) && !fresh.includes(SECRET_A), 'the worker sent the wrong secret, not the old one')
   assert.match(r2.error || '', /^incomplete:/, 'run is flagged incomplete: ' + r2.error)
   assert.ok((r2.error || '').includes('Private pricing'), 'the incomplete warning names the KPI: ' + r2.error)
   step(5, `wrong secret -> run #${r2.id} status=${r2.status}, error: ${r2.error}`)
@@ -221,7 +234,7 @@ try {
   // 6. nothing leaked anywhere
   const hits = leakScan([SECRET_A, SECRET_B])
   assert.deepEqual(hits, [], 'secret found in: ' + hits.join(', '))
-  const scanned = ['api responses (credentials, runs, targets)', PSQL_URL && 'database', RAW_DIR && 'raw files', MM_LOG && 'Mattermost bodies', LOG_FILES.length && 'logs'].filter(Boolean)
+  const scanned = ['api responses (credentials, runs, targets)', 'database', 'raw files', 'Mattermost bodies', 'logs']
   const apiText = JSON.stringify([await api('/api/credentials'), await api('/api/custom-sources'), await api('/api/runs?limit=50')])
   assert.ok(!apiText.includes(SECRET_A) && !apiText.includes(SECRET_B), 'secret in an API response')
   step(6, 'no secret found in: ' + scanned.join(', '))

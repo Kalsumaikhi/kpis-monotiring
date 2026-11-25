@@ -142,7 +142,7 @@ A key lets a KPI link read pages or APIs that need a login or an API token. Keys
 **Set `KPI_SECRET_KEY` first.** Secrets are stored encrypted with it. Without it, Settings → Keys shows a setup note, saving a key returns 503, and any fetch that needs a key fails with `key unavailable (KPI_SECRET_KEY not set)`. Generate one and put it in `.env`:
 
 ```sh
-python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+cd backend && uv run python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 ```
 
 Any other string also works (it is hashed into a key), but a generated Fernet key is best. Keep it safe and backed up separately from the database.
@@ -200,11 +200,16 @@ D=/tmp/kpi-keys-e2e && mkdir -p $D
 openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj "/CN=localhost" -addext "subjectAltName=DNS:localhost" -keyout $D/localhost.key -out $D/localhost.crt
 cat /etc/ssl/certs/ca-certificates.crt $D/localhost.crt > $D/bundle.pem
 
-# start api and worker as above, with these extra variables:
-export KPI_SECRET_KEY=$(python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())")
-export SSL_CERT_FILE=$D/bundle.pem
+export WATCH_ALLOWED_HOSTS=127.0.0.1,localhost   # the stub is on localhost
+export KPI_SECRET_KEY=$(cd backend && uv run python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())")
+# plus DATABASE_URL, DASHBOARD_PASSWORD, RAW_DIR as above, and MATTERMOST_WEBHOOK_URL pointing at your stub
 
-(cd frontend && E2E_KEYS_CERT_DIR=$D npm run e2e:keys)
+# SSL_CERT_FILE only for these two processes, never exported to the shell:
+(cd backend && SSL_CERT_FILE=$D/bundle.pem exec uv run uvicorn app.api.main:app --port 8000 > $D/api.log 2>&1) & API_PID=$!
+(cd backend && SSL_CERT_FILE=$D/bundle.pem exec uv run python -m app.worker > $D/worker.log 2>&1) & WORKER_PID=$!
+
+(cd frontend && E2E_KEYS_CERT_DIR=$D E2E_MM_LOG=/tmp/mm.log E2E_LOG_FILES=$D/api.log,$D/worker.log \
+  E2E_PSQL_URL=postgresql://kpi:kpi@localhost:5432/kpi npm run e2e:keys)
 ```
 
-Optional extra leak checks: `RAW_DIR` (scan the raw files), `E2E_MM_LOG` (a file your Mattermost stub appends request bodies to), `E2E_LOG_FILES` (comma-separated api/worker log files) and `E2E_PSQL_URL` (a plain `postgresql://` URL, needs `psql`). The test removes its KPIs and key afterwards; the empty custom source it created stays (there is no API to delete a source).
+The leak scan always covers every place, so these are all required (the test exits with code 2 and names what is missing): `RAW_DIR` (the raw files), `E2E_MM_LOG` (a file your Mattermost stub appends request bodies to), `E2E_LOG_FILES` (comma-separated api/worker log files), `E2E_PSQL_URL` (a plain `postgresql://` URL; needs `psql`) and `E2E_KEYS_CERT_DIR`. The test removes its KPIs and key afterwards; the empty custom source it created stays (there is no API to delete a source).
