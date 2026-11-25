@@ -166,9 +166,69 @@ Pages:
 4. **Explorer** — browse source → indicator → country; show the value series and its change history.
 5. **KPI frequency** — table of indicators sortable by change count / last changed / typical interval, with sparklines (§5.4).
 6. **Uploads** — manual file upload flow (§5.7).
-7. **Sources settings** — enable/disable, schedule, "run now", and for large portals the list of tracked datasets/series (add/remove).
+7. **Sources settings** — enable/disable, schedule, "run now", and for large portals the list of tracked datasets/series (add/remove). Also where **custom sources** are added, edited and imported (§5.9).
 
 Tables must be server-side paginated and filtered (millions of rows).
+
+Attribution: wherever a source's data is shown, its required credit line is displayed (e.g. SIPRI, World Bank CC BY 4.0).
+
+### 5.9 Custom sources: watched web pages and API links (added 2026-11-25)
+
+**Why:** the user keeps a list of additional sources, mostly web pages and some API links, each described only by **source name, KPI name and link**. They want these watched without writing code, added either in bulk from an Excel sheet or one by one in the settings page.
+
+**Approach (decided with user: option A).** Each link is a **watch target**. Web pages are watched by their main text, with an optional focus area. API links are watched by their JSON values. Considered and not chosen for now: extracting HTML tables into row-level data (B; possible later per page) and rendering every page in a browser (C; offered only as a per-target checkbox).
+
+**Model.**
+- A custom source is a normal `sources` row with `access='watch'`. Rows with the same source name are grouped under one source, and each row becomes one KPI (watch target) of that source.
+- New table `watch_targets`:
+  - `id`, `source_id`, `kpi_name`, `url`, `kind` (`auto` | `page` | `api`; auto by default)
+  - `selector` (optional CSS selector, the "focus area"), `use_browser` (bool, default false), `enabled`
+  - `last_status` (`ok` | `blocked` | `error` | `never`), `last_checked_at`, `last_error`
+  - unique on `(source_id, url)`.
+- New table `watch_snapshots`: `target_id`, `run_id`, `content` (normalised text, or the flattened JSON), `content_hash`, `created_at`. Keep the last N snapshots per target (same retention setting as raw files).
+- Custom sources reuse the existing pipeline unchanged. A generic `WatchConnector` (one instance per custom source, registered from the database rather than in code) produces canonical rows, so diffing, runs, guards, Mattermost, change frequency (§5.4) and the dashboard all work for them:
+  - **Page:** one data point per target: `dataset='page'`, `indicator=kpi_name`, `country=''`, `period=''`, `value=content_hash`.
+  - **API:** one data point per JSON leaf: `dataset='api'`, `indicator=kpi_name`, `dims={"path": "<json.path>"}`, `value=<leaf>`. A changed value is "altered" with its old and new value.
+
+**Fetching a target.**
+- One plain HTTP GET with a generic user agent, a timeout, and at most 1 request per second per host.
+- `auto` kind: a JSON content type means `api`; anything else means `page`.
+- **robots.txt is respected.** A disallowed URL is marked `blocked`, is not fetched, and shows as blocked on the dashboard. It is not a failed run.
+- **Page text extraction:**
+  - Drop scripts, styles, nav, header, footer, aside and forms.
+  - If a selector is set, keep only matching elements.
+  - Otherwise use a main-content heuristic: the `<main>` or `<article>` element if present, else `<body>`.
+  - Normalise whitespace and keep line structure.
+- **`use_browser`:** render the page with headless Chromium (Playwright) before extracting. This option is in the worker image only.
+- **Failures:** a target that fails (HTTP error, timeout) is reported as a run warning and makes the fetch incomplete, so its previous value is kept, not removed. Other targets of the source still update. If every target fails, the run is `failed`.
+
+**Change details.**
+- For a page change, the stored previous and new snapshots give a short excerpt: up to 5 added lines and 5 removed lines, each trimmed to 200 characters.
+- **Mattermost format for watch sources:** `**{source}** — {n} KPI page(s) updated: {kpi names, max 5}` plus the first excerpt and `[View changes]({link})`. API value changes use the normal format.
+- The change-frequency view treats each target as a KPI.
+
+**Noise control.** A target whose content changes on most checks is flagged on the dashboard as "noisy", meaning it changed in more than 80% of its last 10 checks, with a hint to set a focus area. No automatic suppression, so the user still sees every change.
+
+**Adding targets.**
+- **Excel/CSV import (settings page):**
+  - Upload `.xlsx` or `.csv` with the columns `Source name`, `KPI name`, `Link`. Matching is case-insensitive and ignores spaces; extra columns are ignored.
+  - A **preview** lists, per row: new source / existing source, new target / duplicate (same source + link → skipped) / invalid (empty name, or a link that isn't http(s) → error with the row number).
+  - The user confirms, and the valid rows are created.
+  - New custom sources get the default daily schedule.
+- **Manual form (settings page):** source name (pick an existing custom source or type a new one), KPI name, link, plus "advanced" fields for the focus area (CSS selector), kind and "needs a browser".
+- **Test link** button: fetches once and shows the extracted text (first 2,000 characters) or the flattened JSON (first 50 values), so the user can check what will be watched before saving.
+- **Editing:** targets can be edited, disabled or deleted. Deleting a target removes its data points without "removed" alerts. Deleting is a user action, not a source change.
+- Built-in sources (WDI, IMF, SIPRI, …) are not editable here.
+
+**API (additions).**
+- `GET/POST /api/custom-sources`
+- `PATCH/DELETE /api/watch-targets/{id}`
+- `POST /api/watch-targets/test` (body `{url, kind, selector, use_browser}`)
+- `POST /api/watch-targets/import/preview` (multipart file) → rows with status
+- `POST /api/watch-targets/import/confirm` (the preview token) → created counts
+- All of these require the shared password.
+
+**Out of scope for now:** login-protected pages, pages behind CAPTCHAs, API links needing keys (a per-target header/key field can come later), and row-level table extraction from pages.
 
 **Colours:** the user's palette. All colours live in one design-token file (CSS custom properties, light + dark) so components never hard-code a colour; chart series colours come from the same tokens.
 
