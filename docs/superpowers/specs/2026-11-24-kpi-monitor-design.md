@@ -1,7 +1,7 @@
 # KPI Monitor — Design
 
 Date: 2026-11-24
-Status: approved 2026-11-24
+Status: approved 2026-11-24; §5.9 approved 2026-11-25
 
 ## 1. Intent
 
