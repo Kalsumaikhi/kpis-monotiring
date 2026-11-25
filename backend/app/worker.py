@@ -80,7 +80,7 @@ def poll_queued_once(session_factory: SessionFactory, notifier: Notifier | None)
     session = session_factory()
     try:
         queued = session.execute(
-            select(Run.id, Run.trigger, Source.slug, Run.status)
+            select(Run.id, Run.trigger, Source.slug, Run.status, Run.raw_path)
             .join(Source, Source.id == Run.source_id)
             .where(Run.status.in_(("queued", "approve_queued")))
             .order_by(Run.id)
@@ -88,13 +88,15 @@ def poll_queued_once(session_factory: SessionFactory, notifier: Notifier | None)
     finally:
         session.close()
     started = 0
-    for run_id, trigger, slug, status in queued:
+    for run_id, trigger, slug, status, raw_path in queued:
         if status == "approve_queued":
             if _approve_queued(session_factory, run_id, slug, notifier):
                 started += 1
             continue
         try:
-            run_source(session_factory, slug, trigger=trigger, notifier=notifier, run_id=run_id)
+            upload = trigger == "upload"  # user-supplied file: copy it, then hold for review
+            run_source(session_factory, slug, trigger=trigger, notifier=notifier, run_id=run_id,
+                       from_raw=raw_path if upload else None, force_hold=upload)
             started += 1
         except SourceBusyError:
             log.info("source %s busy; run %s stays queued", slug, run_id)

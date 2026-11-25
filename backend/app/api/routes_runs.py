@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.api.util import iso
 from app.api.deps import get_session, get_session_factory
+from app.connectors.watch.excerpt import page_excerpt
 from app.core.pipeline import SourceBusyError, reject_run
 from app.models import Change, PendingChange, Run, Source
 
@@ -107,12 +108,21 @@ def run_changes(
         q = q.where(model.country == country)
     total = session.scalar(select(func.count()).select_from(q.order_by(None).subquery()))
     rows = session.scalars(q.order_by(model.id).limit(page_size).offset((page - 1) * page_size))
+    rows = list(rows)
+    excerpts: dict[str, dict] = {}  # one excerpt per KPI, not per row
+
+    def excerpt_of(c) -> dict:
+        if c.indicator not in excerpts:
+            excerpts[c.indicator] = page_excerpt(session, run.source_id, c.indicator, run_id)
+        return excerpts[c.indicator]
+
     items = [
         {
             "change_type": c.change_type, "dataset": c.dataset, "indicator": c.indicator,
             "country": c.country, "period": c.period, "dims": c.dims,
             "old": _json_value(c.old_num if c.old_num is not None else c.old_text),
             "new": _json_value(c.new_num if c.new_num is not None else c.new_text),
+            **({"excerpt": excerpt_of(c)} if c.dataset == "page" else {}),
         }
         for c in rows
     ]

@@ -17,7 +17,7 @@ class RecordingNotifier:
         self.calls = []
         self.fail = fail
 
-    def notify_run(self, run, source, top_indicators, streak):
+    def notify_run(self, run, source, top_indicators, streak, extras=None):
         if self.fail:
             raise RuntimeError("webhook down")
         self.calls.append((run.status, top_indicators, streak))
@@ -189,7 +189,7 @@ def test_errors_are_redacted_and_truncated(env, db_session):
     assert len(run.error) <= 2000
 
     n = RecordingNotifier()
-    n.notify_run = lambda *a: (_ for _ in ()).throw(ValueError("see https://h/SECRET"))
+    n.notify_run = lambda *a, **k: (_ for _ in ()).throw(ValueError("see https://h/SECRET"))
     conn.download = FakeConnector().download
     conn.rows = [raw("AT", "2020", 1)]
     run = pipeline.run_source(sf, "fake", notifier=n)

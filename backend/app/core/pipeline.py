@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import re
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterable, Protocol
@@ -31,7 +32,8 @@ SessionFactory = Callable[[], Session]
 
 class Notifier(Protocol):
     def notify_run(
-        self, run: Run, source: Source, top_indicators: list[tuple[str, int]], streak: int
+        self, run: Run, source: Source, top_indicators: list[tuple[str, int]], streak: int,
+        extras: dict | None = None,
     ) -> None: ...
 
 
@@ -153,12 +155,58 @@ def _top_indicators(session: Session, run: Run) -> list[tuple[str, int]]:
     return [(i, n) for i, n in rows]
 
 
+_NOT_FINISHED = ("queued", "running", "approve_queued", "superseded")
+_INCOMPLETE = "incomplete:"
+
+
+def _incomplete_note(session: Session, run: Run) -> str | None:
+    """The run's warning when it became incomplete (the previous finished run was not)."""
+    if run.status not in ("ok", "no_change", "baseline") or not (run.error or "").startswith(_INCOMPLETE):
+        return None
+    prev_error = session.execute(
+        select(Run.error)
+        .where(Run.source_id == run.source_id, Run.id < run.id, Run.status.not_in(_NOT_FINISHED))
+        .order_by(Run.id.desc())
+        .limit(1)
+    ).first()
+    if prev_error is not None and (prev_error[0] or "").startswith(_INCOMPLETE):
+        return None
+    return run.error[len(_INCOMPLETE):].strip()
+
+
+def _notify_extras(session: Session, run: Run) -> dict:
+    from app.connectors.watch.excerpt import page_excerpt
+
+    extras: dict = {"page_kpis": [], "excerpt": None, "incomplete_note": _incomplete_note(session, run)}
+    if run.status != "ok":
+        return extras
+    page = list(session.scalars(
+        select(Change.indicator).where(Change.run_id == run.id, Change.dataset == "page")
+        .distinct().order_by(Change.indicator)
+    ))
+    if page:
+        extras["page_kpis"] = page
+        extras["excerpt"] = page_excerpt(session, run.source_id, page[0], run.id)
+        counts = dict(session.execute(
+            select(Change.change_type, func.count())
+            .where(Change.run_id == run.id, Change.dataset != "page")
+            .group_by(Change.change_type)
+        ).all())
+        extras["api_counts"] = (counts.get("added", 0), counts.get("altered", 0),
+                                counts.get("removed", 0))
+    return extras
+
+
 def _notify(session: Session, run: Run, notifier) -> None:
     if notifier is None:
         return
     try:
         source = session.get(Source, run.source_id)
-        notifier.notify_run(run, source, _top_indicators(session, run), _streak(session, run))
+        extras = _notify_extras(session, run)
+        top = _top_indicators(session, run)
+        if extras["page_kpis"]:
+            top = [(i, n) for i, n in top if i not in extras["page_kpis"]]
+        notifier.notify_run(run, source, top, _streak(session, run), extras=extras)
     except Exception as e:  # noqa: BLE001 - notifier problems must not fail the run
         log.error("notifier failed for run %s: %s", run.id, _safe_error(e))
         session.rollback()
@@ -260,8 +308,11 @@ def run_source(
     notifier: Notifier | None = None,
     run_id: int | None = None,
     force_hold: bool = False,
+    from_raw: str | Path | None = None,
 ) -> Run:
     """Run one source. With run_id, reuse that queued Run row (keeping its trigger).
+
+    from_raw: copy this file to the run's raw path instead of downloading.
 
     force_hold holds any run that has changes as suspect_pending (never a baseline).
     """
@@ -293,8 +344,13 @@ def run_source(
             dest = raw_store.path_for(slug, run_id, suffix)
             run.raw_path = str(dest)
             session.commit()
-            with httpx.Client(timeout=60, follow_redirects=True) as client:
-                connector.download(client, dest)
+            if from_raw is not None:
+                if Path(from_raw).resolve() != dest.resolve():
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copyfile(from_raw, dest)
+            else:
+                with httpx.Client(timeout=60, follow_redirects=True) as client:
+                    connector.download(client, dest)
         except Exception as e:  # noqa: BLE001
             run = _fail(session, run_id, e)
             _on_failed(session, connector, run)

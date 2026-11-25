@@ -83,8 +83,11 @@ def _incomplete_ids(session: Session) -> set[int]:
 
 
 @router.get("/sources")
-def list_sources(session: Session = Depends(get_session)):
-    sources = session.scalars(select(Source).order_by(Source.slug)).all()
+def list_sources(access: str | None = None, session: Session = Depends(get_session)):
+    q = select(Source).order_by(Source.slug)
+    if access:
+        q = q.where(Source.access == access)
+    sources = session.scalars(q).all()
     since = datetime.now(timezone.utc) - timedelta(days=30)
 
     last_runs = {

@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, FastAPI
 
-from app.api import routes_kpis, routes_runs, routes_sources, routes_watch
+from app.api import routes_kpis, routes_runs, routes_sources, routes_uploads, routes_watch
 from app.api.deps import require_auth
 
 
@@ -16,6 +16,7 @@ def create_app() -> FastAPI:
     protected.include_router(routes_runs.router)
     protected.include_router(routes_kpis.router)
     protected.include_router(routes_watch.router)
+    protected.include_router(routes_uploads.router)
     app.include_router(protected)
     return app
 
