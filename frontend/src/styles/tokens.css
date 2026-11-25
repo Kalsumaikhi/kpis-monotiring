@@ -1,0 +1,154 @@
+/*
+ * Design tokens. Every colour in the app comes from here; components never hard-code one.
+ *
+ * Palette (spec): Dark Green #063B2B, Spring Green #05EA7D, Mid Green #00874F, Light Green #E8F2DD.
+ * Spring Green is an accent for Dark Green surfaces only (active nav item, dark-theme accent).
+ *
+ * Contrast ratios (WCAG, text vs surface), computed from the values below.
+ *
+ * LIGHT   (--bg #E8F2DD, --surface #FFFFFF)
+ *   text/bg            10.90    text #063B2B
+ *   text/surface       12.59
+ *   text-muted/surface  7.07    #3F5F52  (6.12 on --bg)
+ *   accent/surface      4.59    #00874F  (white on --btn-bg is also 4.59)
+ *   link/bg             5.73    #006B3F  (--link: links and secondary buttons; use --accent only for fills)
+ *   link/surface        6.61
+ *   status-ok/surface   4.59    #00874F
+ *   status-warn/surface 6.33    #8A5300  (amber, dark enough for text)
+ *   status-fail/surface 6.54    #B3261E
+ *   nav-text/nav-bg     9.36    #CFE3D6 on #063B2B
+ *   nav-active/nav-bg   7.84    #05EA7D on #063B2B
+ *   Note: Mid Green on the Light Green page tint is only 3.97, so text-coloured links use --link.
+ *
+ * DARK    (--bg #04211A, --surface #0A3022; surfaces derived from Dark Green)
+ *   text/bg            14.69    #E8F2DD
+ *   text/surface       12.46
+ *   text-muted/surface  7.71    #A9C4B5
+ *   accent/surface      8.96    #05EA7D
+ *   link/bg            10.56    #05EA7D  (link/surface 8.96)
+ *   status-ok/surface   7.69    #3FD68E
+ *   status-warn/surface 7.74    #F2B340
+ *   status-fail/surface 6.31    #FF8A80
+ *   nav-text/nav-bg    11.77    #BFD6C8 on #031A14
+ *   nav-active/nav-bg  11.25    #05EA7D on #031A14
+ */
+/*
+ * Chart series (--series-1..6), validated with the dataviz validate_palette.js (light on #ffffff, dark on #0a3022).
+ * Series 1 is Mid Green. Brand tints (Dark Green, Spring Green, lighter greens) cannot give six distinguishable
+ * series: Dark Green and Spring Green fall outside the lightness band and tints of one hue collapse under
+ * colour-vision-deficiency simulation, so slots 2-6 extend the palette with blue, magenta, olive, violet and
+ * teal. Amber and red are never used: they mean "altered" and "removed" (--chg-*). Each slot also has its own
+ * dash pattern in SeriesChart.vue. Results:
+ *   light  #00874f #2b6cd0 #a8479a #6b8e23 #7b4fd6 #0e9aa7  all pass (adjacent CVD worst 9.2, normal-vision worst 20.0)
+ *   dark   #00874f #3b82e0 #c060b0 #8aa832 #9b6bf0 #12a8b8  all pass (adjacent CVD worst 7.8 = WARN band, legal with dashes + legend)
+ */
+:root {
+  --c-dark-green: #063b2b;
+  --c-spring-green: #05ea7d;
+  --c-mid-green: #00874f;
+  --c-light-green: #e8f2dd;
+
+  --bg: #e8f2dd;
+  --surface: #ffffff;
+  --surface-2: #f3f8ee;
+  --text: #063b2b;
+  --text-muted: #3f5f52;
+  --border: #c5d7bd;
+  --accent: #00874f;
+  --link: #006b3f;
+  --btn-bg: #00874f;
+  --btn-text: #ffffff;
+  --nav-bg: #063b2b;
+  --nav-text: #cfe3d6;
+  --nav-active: #05ea7d;
+  --nav-hover: rgba(255, 255, 255, 0.08);
+  --status-ok: #00874f;
+  --status-warn: #8a5300;
+  --status-fail: #b3261e;
+  --chg-added: #00874f;
+  --chg-altered: #8a5300;
+  --chg-removed: #b3261e;
+  --focus: #00874f;
+  --shadow: 0 1px 2px rgba(6, 59, 43, 0.08);
+  --series-1: var(--c-mid-green);
+  --series-2: #2b6cd0;
+  --series-3: #a8479a;
+  --series-4: #6b8e23;
+  --series-5: #7b4fd6;
+  --series-6: #0e9aa7;
+  --overlay: rgba(4, 33, 26, 0.55);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    --c-dark-green: #063b2b;
+    --c-spring-green: #05ea7d;
+    --c-mid-green: #00874f;
+    --c-light-green: #e8f2dd;
+    --bg: #04211a;
+    --surface: #0a3022;
+    --surface-2: #08281d;
+    --text: #e8f2dd;
+    --text-muted: #a9c4b5;
+    --border: #1d5240;
+    --accent: #05ea7d;
+    --link: #05ea7d;
+    --btn-bg: #00874f;
+    --btn-text: #ffffff;
+    --nav-bg: #031a14;
+    --nav-text: #bfd6c8;
+    --nav-active: #05ea7d;
+    --nav-hover: rgba(255, 255, 255, 0.07);
+    --status-ok: #3fd68e;
+    --status-warn: #f2b340;
+    --status-fail: #ff8a80;
+    --chg-added: #3fd68e;
+    --chg-altered: #f2b340;
+    --chg-removed: #ff8a80;
+    --focus: #05ea7d;
+    --shadow: none;
+    --series-1: var(--c-mid-green);
+    --series-2: #3b82e0;
+    --series-3: #c060b0;
+    --series-4: #8aa832;
+    --series-5: #9b6bf0;
+    --series-6: #12a8b8;
+    --overlay: rgba(0, 0, 0, 0.6);
+  }
+}
+
+:root[data-theme='dark'] {
+  --c-dark-green: #063b2b;
+  --c-spring-green: #05ea7d;
+  --c-mid-green: #00874f;
+  --c-light-green: #e8f2dd;
+  --bg: #04211a;
+  --surface: #0a3022;
+  --surface-2: #08281d;
+  --text: #e8f2dd;
+  --text-muted: #a9c4b5;
+  --border: #1d5240;
+  --accent: #05ea7d;
+  --link: #05ea7d;
+  --btn-bg: #00874f;
+  --btn-text: #ffffff;
+  --nav-bg: #031a14;
+  --nav-text: #bfd6c8;
+  --nav-active: #05ea7d;
+  --nav-hover: rgba(255, 255, 255, 0.07);
+  --status-ok: #3fd68e;
+  --status-warn: #f2b340;
+  --status-fail: #ff8a80;
+  --chg-added: #3fd68e;
+  --chg-altered: #f2b340;
+  --chg-removed: #ff8a80;
+  --focus: #05ea7d;
+  --shadow: none;
+  --series-1: var(--c-mid-green);
+  --series-2: #3b82e0;
+  --series-3: #c060b0;
+  --series-4: #8aa832;
+  --series-5: #9b6bf0;
+  --series-6: #12a8b8;
+  --overlay: rgba(0, 0, 0, 0.6);
+}

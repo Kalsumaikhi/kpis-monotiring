@@ -130,16 +130,22 @@ def canonicalize_value(v: Any) -> tuple[Decimal | None, str | None] | None:
     raise TypeError(f"unsupported value type: {type(v).__name__}")
 
 
+def dims_to_json(dims) -> str:
+    return json.dumps(dict(dims), sort_keys=True, separators=(",", ":"))
+
+
+def key_hash_for(dataset: str, indicator: str, country: str, period: str, dims_json: str) -> str:
+    return _sha1("\x1f".join([dataset, indicator, country, period, dims_json]))
+
+
 def to_canonical(row: RawRow) -> CanonicalRow | None:
     parsed = canonicalize_value(row.value)
     if parsed is None:
         return None
     value_num, value_text = parsed
 
-    dims_json = json.dumps(dict(row.dims), sort_keys=True, separators=(",", ":"))
-    key_hash = _sha1(
-        "\x1f".join([row.dataset, row.indicator, row.country, row.period, dims_json])
-    )
+    dims_json = dims_to_json(row.dims)
+    key_hash = key_hash_for(row.dataset, row.indicator, row.country, row.period, dims_json)
     if value_num is not None:
         value_hash = _sha1("n:" + format(value_num, "f"))
     else:

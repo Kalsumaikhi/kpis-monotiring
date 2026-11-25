@@ -84,6 +84,7 @@ def _year(v) -> int | None:
 
 class SipriMilex:
     slug = "sipri-milex"
+    attribution = "Source: SIPRI Military Expenditure Database"
     name = "SIPRI Military Expenditure Database"
     area = "military"
     access = "url"

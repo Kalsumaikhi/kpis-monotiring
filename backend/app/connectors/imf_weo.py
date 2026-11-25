@@ -58,6 +58,7 @@ def _clean(v) -> str | None:
 
 class ImfWeo:
     slug = "imf-weo"
+    attribution = "Source: IMF DataMapper"
     name = "IMF World Economic Outlook"
     area = "economic"
     access = "api"

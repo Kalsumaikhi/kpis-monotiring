@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from app.api.util import iso
 from app.api.deps import get_session
+from app.api.routes_kpis import attribution_for
 from app.models import Change, DataPoint, Run, Source
 
 router = APIRouter()
@@ -29,7 +30,8 @@ def _source_or_404(session: Session, slug: str) -> Source:
     return source
 
 
-def _serialise(source: Source, last_run: Run | None, last_change_at, rows_tracked, changes_30d, streak):
+def _serialise(source: Source, last_run: Run | None, last_change_at, rows_tracked, changes_30d, streak,
+               incomplete=False, noisy_targets=0, last_success_at=None):
     return {
         "slug": source.slug,
         "name": source.name,
@@ -49,18 +51,59 @@ def _serialise(source: Source, last_run: Run | None, last_change_at, rows_tracke
         "rows_tracked": rows_tracked,
         "changes_30d": changes_30d,
         "failing_streak": streak,
+        "attribution": attribution_for(source.slug),
+        "incomplete": incomplete,
+        "noisy_targets": noisy_targets,
+        "last_success_at": iso(last_success_at),
     }
 
 
+def _noisy_counts(session: Session) -> dict[int, int]:
+    """Number of noisy watch targets (changed in >8 of last 10 snapshots), by source id."""
+    from app.connectors.watch import noisy_counts
+
+    return noisy_counts(session)
+
+
+def _incomplete_ids(session: Session) -> set[int]:
+    """Sources whose latest finished run (not failed) has an 'incomplete:' error."""
+    return set(
+        session.execute(
+            text(
+                """
+                SELECT source_id FROM (
+                    SELECT DISTINCT ON (source_id) source_id, status, error FROM runs
+                    WHERE status NOT IN ('queued', 'running', 'approve_queued')
+                    ORDER BY source_id, id DESC
+                ) latest
+                WHERE status <> 'failed' AND error LIKE 'incomplete:%'
+                """
+            )
+        ).scalars()
+    )
+
+
 @router.get("/sources")
-def list_sources(session: Session = Depends(get_session)):
-    sources = session.scalars(select(Source).order_by(Source.slug)).all()
+def list_sources(access: str | None = None, session: Session = Depends(get_session)):
+    q = select(Source).order_by(Source.slug)
+    if access:
+        q = q.where(Source.access == access)
+    sources = session.scalars(q).all()
     since = datetime.now(timezone.utc) - timedelta(days=30)
 
     last_runs = {
         r.source_id: r
         for r in session.scalars(
             select(Run).ext(distinct_on(Run.source_id)).order_by(Run.source_id, Run.id.desc())
+        )
+    }
+    last_success = {
+        r.source_id: r.finished_at
+        for r in session.scalars(
+            select(Run)
+            .ext(distinct_on(Run.source_id))
+            .where(Run.status.in_(("ok", "no_change", "baseline")), Run.finished_at.is_not(None))
+            .order_by(Run.source_id, Run.finished_at.desc())
         )
     }
     change_stats = {
@@ -91,10 +134,13 @@ def list_sources(session: Session = Depends(get_session)):
             )
         ).all()
     )
+    incomplete = _incomplete_ids(session)
+    noisy = _noisy_counts(session)
     return [
         _serialise(
             s, last_runs.get(s.id), change_stats.get(s.id, (None, 0))[0],
             rows.get(s.id, 0), change_stats.get(s.id, (None, 0))[1], streaks.get(s.id, 0),
+            s.id in incomplete, noisy.get(s.id, 0), last_success.get(s.id),
         )
         for s in sources
     ]

@@ -26,6 +26,8 @@ class ParseResult:
     indicators: list[IndicatorMeta]
     vintage: str | None = None
     warnings: list[str] = field(default_factory=list)
+    # Indicators whose rows are stored silently this run (no counts, no changes).
+    baseline_indicators: list[str] = field(default_factory=list)
 
 
 class Connector(Protocol):

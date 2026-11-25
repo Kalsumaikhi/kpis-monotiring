@@ -1,6 +1,6 @@
 # KPI Monitor
 
-Tracks public statistical datasets, detects **added, altered and removed** values between releases, and posts a Mattermost alert when something changes. Plan 1 covers the data pipeline and alerts; there is no dashboard UI yet, only the REST API.
+Tracks public statistical datasets, detects **added, altered and removed** values between releases, and posts a Mattermost alert when something changes. Plan 1 covers the data pipeline and alerts; Plan 2 adds the web dashboard.
 
 ## Sources
 
@@ -52,10 +52,13 @@ Run from `backend/` (or `docker compose exec worker ...`):
 python -m app.cli sync-sources                       # register the connectors in the DB
 python -m app.cli run <slug>                         # download, parse, diff, notify
 python -m app.cli run <slug> --from-raw <path>       # test-only: reprocess a local raw file
+python -m app.cli backfill-rollup                    # rebuild the change-frequency counts from all changes
 python -m app.worker                                 # scheduler
 ```
 
 `run` prints `slug: status rows=N added=N altered=N removed=N`. Exit codes: 1 failed, 2 bad arguments, 3 source busy. The first run of a source is a `baseline`; later runs report `no_change` or `ok`.
+
+The KPI frequency and explorer views read per-day counts from `change_rollup`. Migration `0006` fills it from existing changes when an older database is upgraded; `backfill-rollup` rebuilds it by hand (safe to repeat).
 
 ## API
 
@@ -79,3 +82,84 @@ TEST_DATABASE_URL=postgresql+psycopg://kpi:kpi@localhost:5432/kpi_test uv run py
 - **World Bank WDI**: CC BY 4.0. Attribute the World Bank.
 - **SIPRI Military Expenditure Database**: free to download, cite and use for statistical or analytical purposes under its fair-use policy: non-commercial use and reproducing less than 10 per cent of the data set. Attribution is required ("Information from the Stockholm International Peace Research Institute (SIPRI) Military Expenditure Database, https://doi.org/10.55163/CQGC9685"). Commercial use, including internal tools for business advantage, needs a SIPRI licence. See the SIPRI terms and conditions.
 - **IMF WEO**: see the IMF terms of use (imf.org copyright page) before redistributing the data.
+
+## Dashboard
+
+A Vue 3 single-page app in `frontend/`, served by nginx on <http://localhost:8080> (`docker compose up web`). nginx proxies `/api/` to the `api` service. Sign in with `DASHBOARD_PASSWORD` (any username); the password is kept in `sessionStorage` for the tab.
+
+Local development:
+
+```
+cd frontend
+npm install
+npm run dev      # http://localhost:5173, proxies /api to http://localhost:8000
+npx vitest run   # unit tests
+npm run build    # type-check and build to dist/
+```
+
+All colours are CSS custom properties in `frontend/src/styles/tokens.css`, with light and dark themes.
+
+### Pages
+
+| Page | What it does |
+|---|---|
+| Overview | One card per source: last run, rows tracked, changes in 30 days, "Run now" |
+| Changes | Run feed with filters; open a run for its change list (page changes show a `+`/`−` text excerpt) |
+| Explorer | Source → indicator → country, with a chart, data points and change history |
+| KPI frequency | How often each indicator changes (30 days, 12 months, all time) |
+| Uploads | Manual uploads |
+| Settings | Schedules for built-in sources, and custom sources (add, test, import, disable, delete) |
+
+![Overview](docs/screenshots/overview-light.png)
+![Overview, dark theme](docs/screenshots/overview-dark.png)
+![Run detail of a page-change run](docs/screenshots/run-detail.png)
+![KPI frequency](docs/screenshots/kpi-frequency.png)
+![Explorer chart](docs/screenshots/explorer-chart.png)
+![Settings, custom sources](docs/screenshots/settings-custom-sources.png)
+
+## Custom sources
+
+Besides the built-in datasets you can watch any web page or JSON API link (Settings → Custom sources). Each KPI is one link; KPIs are grouped under a source name.
+
+- **Add KPI**: source name, KPI name, link. "Test link" shows what would be read. Under Advanced you can set a CSS selector (focus area), force page/API mode, or ask for a headless browser for JavaScript-built pages.
+- **Import from Excel/CSV**: a `.xlsx` or `.csv` with the columns `Source name`, `KPI name`, `Link` (the dialog offers a template). The preview marks each row as new, existing, duplicate (skipped) or invalid before anything is created.
+- **Renaming a KPI** keeps its current value but starts its change history fresh: past changes stay in the change feed and run details under the old name, while the explorer and KPI frequency count only changes recorded after the rename.
+- **First check**: a new KPI's first check only records a baseline; no change alert is sent. Alerts (and Mattermost messages) start with the second check that finds a change; built-in sources still post a one-line "baseline loaded" note. The Mattermost message lists the changed KPI pages with a short `+`/`-` excerpt in a code block (page text is shown as code, so it cannot format the message or @mention anyone).
+- **Politeness and safety**: `robots.txt` is respected, requests are limited to 1 per second per host, and links to internal addresses (loopback, private ranges) are blocked unless the host is listed in `WATCH_ALLOWED_HOSTS`. Redirects are re-checked on every hop. In browser mode, Chromium sends all its traffic (page, images, scripts, redirects, HTTPS and WebSockets) through a small built-in proxy that applies the same block, and WebRTC UDP is disabled.
+
+Additional environment variables:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `WATCH_ALLOWED_HOSTS` | empty | Comma-separated hosts exempt from the internal-address block (for example `127.0.0.1,localhost` for local testing) |
+| `KPI_CHROMIUM_PATH` | empty | Chromium executable used for "needs a browser" KPIs; empty uses Playwright's own browser |
+
+## Attribution
+
+Every dashboard page that shows data from a built-in source carries that source's attribution line (World Bank CC BY 4.0, SIPRI citation, IMF DataMapper). Keep these when sharing screenshots or exports; see "Data and licensing" above.
+
+## End-to-end test
+
+`frontend/tests/e2e/smoke.mjs` drives a real browser through the whole stack: login, overview, changes and run detail, explorer chart, KPI frequency, adding and testing a custom KPI, a baseline run then a changed-page run (the `+` excerpt), CSV import with a duplicate, and delete. It needs the api, the worker and the built frontend running. Requirements: Node 20.11 or newer, Playwright with a Chromium it can launch (the test looks for the `playwright` module via normal resolution; set `PLAYWRIGHT_MODULE` to a path if it is installed globally; the browser starts with `--no-sandbox` so it also works as root in containers), and the backend dependencies (`uv`). `dev` below is a **test-only password** for a throwaway local stack; never use it for a real deployment.
+
+```sh
+export DATABASE_URL=postgresql+psycopg://kpi:kpi@localhost:5432/kpi
+export DASHBOARD_PASSWORD=dev                      # test-only password
+export WATCH_ALLOWED_HOSTS=127.0.0.1,localhost     # lets the test watch its local page server
+export RAW_DIR=/tmp/kpi-raw && mkdir -p "$RAW_DIR"
+# optional: MATTERMOST_WEBHOOK_URL=http://127.0.0.1:8766/hook (a stub server of your own)
+
+(cd backend && uv run alembic upgrade head)
+(cd backend && exec uv run uvicorn app.api.main:app --port 8000) & API_PID=$!
+(cd backend && exec uv run python -m app.worker) & WORKER_PID=$!
+(cd frontend && npm run build && exec ./node_modules/.bin/vite preview --port 8080) & WEB_PID=$!
+
+(cd frontend && npm run e2e)                       # the smoke test
+(cd frontend && node tests/e2e/screenshots.mjs)    # optional: regenerate docs/screenshots/
+
+kill $API_PID $WORKER_PID $WEB_PID                 # stop the three background servers
+```
+
+Set `KPI_CHROMIUM_PATH` to a Chromium executable if Playwright's own browser is not installed; the smoke test and the worker's "needs a browser" KPIs both use it.
+
+The test serves its own page on 127.0.0.1:8765 (`E2E_PAGE_PORT`), removes the KPIs it creates (also on failure or Ctrl-C), and waits up to 90 s per run for the worker.

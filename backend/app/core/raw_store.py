@@ -18,7 +18,7 @@ def path_for(slug: str, run_id: int, suffix: str) -> Path:
 
 
 def prune(session: Session, source_id: int, keep: int) -> None:
-    """Delete raw files of runs older than the newest `keep`; never suspect_pending ones."""
+    """Delete raw files of runs older than the newest `keep`; never held or in-flight (suspect_pending/approve_queued/queued/running) ones."""
     runs = session.scalars(
         select(Run)
         .where(Run.source_id == source_id, Run.raw_path.is_not(None))
@@ -26,7 +26,7 @@ def prune(session: Session, source_id: int, keep: int) -> None:
         .offset(keep)
     ).all()
     for r in runs:
-        if r.status == "suspect_pending":
+        if r.status in ("suspect_pending", "approve_queued", "queued", "running"):
             continue
         Path(r.raw_path).unlink(missing_ok=True)
         r.raw_path = None

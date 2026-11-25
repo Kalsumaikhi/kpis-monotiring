@@ -8,22 +8,22 @@ from __future__ import annotations
 
 import logging
 import re
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterable, Protocol
 
 import httpx
-from sqlalchemy import Engine, func, select, text, update
-from sqlalchemy.exc import DBAPIError
+from sqlalchemy import Engine, case, delete, func, select, text, update
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.connectors.base import IndicatorMeta
-from app.connectors.registry import get_connector
-from app.core import raw_store
+from app.connectors.registry import resolve_connector
+from app.core import raw_store, rollup
 from app.core.canonical import to_canonical
-from app.core.diff import DiffResult, apply_diff, compute_diff, stage_rows
-from app.models import Change, DataPoint, Run, Source
+from app.core.diff import DiffResult, apply_diff, compute_diff, record_pending, stage_rows
+from app.models import Change, DataPoint, PendingChange, Run, Source, WatchTarget
 
 log = logging.getLogger(__name__)
 
@@ -32,16 +32,13 @@ SessionFactory = Callable[[], Session]
 
 class Notifier(Protocol):
     def notify_run(
-        self, run: Run, source: Source, top_indicators: list[tuple[str, int]], streak: int
+        self, run: Run, source: Source, top_indicators: list[tuple[str, int]], streak: int,
+        extras: dict | None = None,
     ) -> None: ...
 
 
 class SourceBusyError(Exception):
     """Another run of this source holds the per-source advisory lock."""
-
-
-class PreviewUnavailableError(ValueError):
-    """The raw file of a held run cannot be previewed (missing or unparseable)."""
 
 
 class RunNotQueuedError(Exception):
@@ -114,6 +111,7 @@ def _canonical_rows(rows: Iterable):
 
 
 def _upsert_indicators(session: Session, source_id: int, metas: list[IndicatorMeta]) -> None:
+    # indicators.first_seen_at defaults to now() on insert and is never updated.
     for m in metas:
         session.execute(
             text(
@@ -157,12 +155,63 @@ def _top_indicators(session: Session, run: Run) -> list[tuple[str, int]]:
     return [(i, n) for i, n in rows]
 
 
+_NOT_FINISHED = ("queued", "running", "approve_queued", "superseded")
+_INCOMPLETE = "incomplete:"
+
+
+def _incomplete_note(session: Session, run: Run) -> str | None:
+    """The run's warning when it became incomplete (the previous finished run was not)."""
+    if run.status not in ("ok", "no_change", "baseline") or not (run.error or "").startswith(_INCOMPLETE):
+        return None
+    prev_error = session.execute(
+        select(Run.error)
+        .where(Run.source_id == run.source_id, Run.id < run.id, Run.status.not_in(_NOT_FINISHED))
+        .order_by(Run.id.desc())
+        .limit(1)
+    ).first()
+    if prev_error is not None and (prev_error[0] or "").startswith(_INCOMPLETE):
+        return None
+    return run.error[len(_INCOMPLETE):].strip()
+
+
+def _notify_extras(session: Session, run: Run) -> dict:
+    from app.connectors.watch.excerpt import page_excerpt
+
+    extras: dict = {"page_kpis": [], "excerpt": None, "incomplete_note": _incomplete_note(session, run)}
+    if run.status != "ok":
+        return extras
+    page = list(session.scalars(
+        select(Change.indicator).where(Change.run_id == run.id, Change.dataset == "page")
+        .distinct()
+    ))
+    order = {n: i for i, n in enumerate(session.scalars(  # target order, not alphabetical
+        select(WatchTarget.kpi_name).where(WatchTarget.source_id == run.source_id)
+        .order_by(WatchTarget.id)
+    ))}
+    page.sort(key=lambda n: (order.get(n, len(order)), n))
+    if page:
+        extras["page_kpis"] = page
+        extras["excerpt"] = page_excerpt(session, run.source_id, page[0], run.id)
+        counts = dict(session.execute(
+            select(Change.change_type, func.count())
+            .where(Change.run_id == run.id, Change.dataset != "page")
+            .group_by(Change.change_type)
+        ).all())
+        extras["api_counts"] = (counts.get("added", 0), counts.get("altered", 0),
+                                counts.get("removed", 0))
+    return extras
+
+
 def _notify(session: Session, run: Run, notifier) -> None:
     if notifier is None:
         return
     try:
         source = session.get(Source, run.source_id)
-        notifier.notify_run(run, source, _top_indicators(session, run), _streak(session, run))
+        extras = _notify_extras(session, run)
+        top = _top_indicators(session, run)
+        if extras["page_kpis"]:
+            top = [(i, n) for i, n in top if i not in extras["page_kpis"]]
+        notifier.notify_run(run, source, top, _streak(session, run), extras=extras)
     except Exception as e:  # noqa: BLE001 - notifier problems must not fail the run
         log.error("notifier failed for run %s: %s", run.id, _safe_error(e))
         session.rollback()
@@ -190,6 +239,30 @@ def _fail(session: Session, run_id: int, e: Exception) -> Run:
     return run
 
 
+HELD_STATUSES = ("suspect_pending", "approve_queued")
+
+
+def _supersede_held(session: Session, source_id: int, before_id: int | None = None,
+                    except_id: int | None = None, reason: str = "a newer run") -> None:
+    """Mark older held runs superseded and drop their pending changes."""
+    q = update(Run).where(Run.source_id == source_id, Run.status.in_(HELD_STATUSES))
+    if before_id is not None:
+        q = q.where(Run.id < before_id)
+    if except_id is not None:
+        q = q.where(Run.id != except_id)
+    # CASE reads the pre-update status, so the message says whether an approval was lost.
+    msg = case(
+        (Run.status == "approve_queued",
+         f"superseded by {reason} before the approval was applied"),
+        else_=f"superseded by {reason}",
+    )
+    ids = session.execute(
+        q.values(status="superseded", error=msg).returning(Run.id)
+    ).scalars().all()
+    if ids:
+        session.execute(delete(PendingChange).where(PendingChange.run_id.in_(ids)))
+
+
 def _finish(session: Session, run: Run, status: str, diff: DiffResult, metas, vintage, warnings=None) -> None:
     run.status = status
     run.rows_total = diff.total
@@ -201,15 +274,36 @@ def _finish(session: Session, run: Run, status: str, diff: DiffResult, metas, vi
     if status != "suspect_pending":
         # Metadata of an unapproved (held) file must not reach the indicators table.
         _upsert_indicators(session, run.source_id, metas)
+        if status == "ok":
+            rollup.refresh_rollup(session, run.id)  # same transaction as the applied changes
         # Newer good data makes any earlier held run stale: approving it would re-apply old removals.
-        session.execute(
-            update(Run)
-            .where(Run.source_id == run.source_id, Run.status == "suspect_pending",
-                   Run.id < run.id)
-            .values(status="superseded")
-        )
+        _supersede_held(session, run.source_id, before_id=run.id)
     session.commit()
     _safe_prune(session, run.source_id)
+
+
+def _after_run(session: Session, connector, run: Run) -> None:
+    """Optional connector hook for non-failed runs; its failure never fails the run."""
+    hook = getattr(connector, "after_run", None)
+    if hook is None:
+        return
+    try:
+        hook(session, run)
+    except Exception as e:  # noqa: BLE001
+        log.error("after_run failed for run %s: %s", run.id, _safe_error(e))
+        session.rollback()
+
+
+def _on_failed(session: Session, connector, run: Run) -> None:
+    """Optional connector hook for failed runs that have a raw file; never raises."""
+    hook = getattr(connector, "on_failed", None)
+    if hook is None:
+        return
+    try:
+        hook(session, run)
+    except Exception as e:  # noqa: BLE001
+        log.error("on_failed failed for run %s: %s", run.id, _safe_error(e))
+        session.rollback()
 
 
 def run_source(
@@ -218,13 +312,20 @@ def run_source(
     trigger: str = "schedule",
     notifier: Notifier | None = None,
     run_id: int | None = None,
+    force_hold: bool = False,
+    from_raw: str | Path | None = None,
 ) -> Run:
-    """Run one source. With run_id, reuse that queued Run row (keeping its trigger)."""
-    connector = get_connector(slug)
+    """Run one source. With run_id, reuse that queued Run row (keeping its trigger).
+
+    from_raw: copy this file to the run's raw path instead of downloading.
+
+    force_hold holds any run that has changes as suspect_pending (never a baseline).
+    """
     settings = get_settings()
     session = session_factory()
     release = None
     try:
+        connector = resolve_connector(session, slug)  # KeyError for unknown slug, before any row
         source = session.scalars(select(Source).where(Source.slug == slug)).one()
         release = _acquire_source_lock(session, source.id)  # SourceBusyError before any row
         if run_id is not None:
@@ -248,17 +349,24 @@ def run_source(
             dest = raw_store.path_for(slug, run_id, suffix)
             run.raw_path = str(dest)
             session.commit()
-            with httpx.Client(timeout=60, follow_redirects=True) as client:
-                connector.download(client, dest)
+            if from_raw is not None:
+                if Path(from_raw).resolve() != dest.resolve():
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copyfile(from_raw, dest)
+            else:
+                with httpx.Client(timeout=60, follow_redirects=True) as client:
+                    connector.download(client, dest)
         except Exception as e:  # noqa: BLE001
             run = _fail(session, run_id, e)
+            _on_failed(session, connector, run)
             _notify(session, run, notifier)
             return _detach(session, run)
 
         try:
             parsed = connector.parse(dest)
+            excl = parsed.baseline_indicators
             stage_rows(session, _canonical_rows(parsed.rows))
-            diff = compute_diff(session, source.id, parsed.complete)
+            diff = compute_diff(session, source.id, parsed.complete, excl)
             has_history = session.scalar(
                 select(
                     select(DataPoint.id).where(DataPoint.source_id == source.id).exists()
@@ -272,25 +380,30 @@ def run_source(
             if not has_history:
                 apply_diff(session, source.id, run_id, parsed.complete, record_changes=False)
                 status = "baseline"
-            elif diff.existing > 0 and diff.removed / diff.existing > settings.suspect_removal_ratio:
+            elif (
+                (diff.existing > 0 and diff.removed / diff.existing > settings.suspect_removal_ratio)
+                or (force_hold and diff.added + diff.altered + diff.removed > 0)
+            ):
                 status = "suspect_pending"
-                session.execute(
-                    update(Run)
-                    .where(Run.source_id == source.id, Run.status == "suspect_pending",
-                           Run.id != run_id)
-                    .values(status="superseded")
-                )
+                _supersede_held(session, source.id, except_id=run_id)
+                record_pending(session, source.id, run_id, parsed.complete, excl)
             elif diff.added + diff.altered + diff.removed == 0:
                 status = "no_change"
+                if excl:  # silent baseline rows still need storing
+                    apply_diff(session, source.id, run_id, parsed.complete, record_changes=False,
+                               exclude_indicators=excl)
             else:
-                apply_diff(session, source.id, run_id, parsed.complete, record_changes=True)
+                apply_diff(session, source.id, run_id, parsed.complete, record_changes=True,
+                           exclude_indicators=excl)
                 status = "ok"
             _finish(session, run, status, diff, parsed.indicators, parsed.vintage, parsed.warnings)
         except Exception as e:  # noqa: BLE001
             run = _fail(session, run_id, e)
+            _on_failed(session, connector, run)
             _notify(session, run, notifier)
             return _detach(session, run)
 
+        _after_run(session, connector, run)
         _notify(session, run, notifier)
         return _detach(session, run)
     finally:
@@ -313,25 +426,30 @@ def approve_run(session_factory: SessionFactory, run_id: int, notifier: Notifier
         session.refresh(run)
         latest = session.scalar(
             select(func.max(Run.id)).where(
-                Run.source_id == run.source_id, Run.status == "suspect_pending"
+                Run.source_id == run.source_id, Run.status.in_(HELD_STATUSES)
             )
         )
-        if run.status != "suspect_pending" or latest != run.id:
-            raise ValueError(f"run {run_id} is not the latest suspect_pending run")
+        if run.status not in HELD_STATUSES or latest != run.id:
+            raise ValueError(f"run {run_id} is not the latest held (suspect_pending/approve_queued) run")
         if not run.raw_path:
             raise ValueError(f"run {run_id} has no raw file")
         source = session.get(Source, run.source_id)
-        connector = get_connector(source.slug)
+        connector = resolve_connector(session, source.slug)
         try:
             parsed = connector.parse(Path(run.raw_path))
             stage_rows(session, _canonical_rows(parsed.rows))
-            diff = compute_diff(session, source.id, parsed.complete)
-            apply_diff(session, source.id, run.id, parsed.complete, record_changes=True)
+            diff = compute_diff(session, source.id, parsed.complete, parsed.baseline_indicators)
+            apply_diff(session, source.id, run.id, parsed.complete, record_changes=True,
+                       exclude_indicators=parsed.baseline_indicators)
             run.trigger = "approve"
+            run.error = None
+            # The raw file is the single source of truth: changes were just recorded from it.
+            session.execute(delete(PendingChange).where(PendingChange.run_id == run.id))
             _finish(session, run, "ok", diff, parsed.indicators, parsed.vintage, parsed.warnings)
         except Exception:
             session.rollback()
             raise
+        _after_run(session, connector, run)  # e.g. watch targets are baselined once applied
         _notify(session, run, notifier)
         return _detach(session, run)
     finally:
@@ -356,95 +474,10 @@ def reject_run(session_factory: SessionFactory, run_id: int) -> Run:
             raise ValueError(f"run {run_id} is not suspect_pending")
         run.status = "rejected"
         run.finished_at = _now()
+        session.execute(delete(PendingChange).where(PendingChange.run_id == run.id))
         session.commit()
         return _detach(session, run)
     finally:
         session.close()
         if release is not None:
             release()
-
-
-def preview_changes(
-    session: Session,
-    run_id: int,
-    change_type: str | None = None,
-    indicator: str | None = None,
-    country: str | None = None,
-    page: int = 1,
-    page_size: int = 50,
-) -> tuple[list[dict], int]:
-    """Would-be changes of a suspect_pending run, computed from its raw file. Never writes.
-
-    Stages the re-parsed rows in the session's transaction, SELECTs the added/altered/removed
-    rows against the current data_points, then rolls back (which also drops the staging table).
-    """
-    run = session.get(Run, run_id)
-    if run is None or run.status != "suspect_pending":
-        raise ValueError(f"run {run_id} is not suspect_pending")
-    if not run.raw_path:
-        raise ValueError(f"run {run_id} has no raw file")
-    source = session.get(Source, run.source_id)
-    source_id, raw_path = source.id, Path(run.raw_path)
-    connector = get_connector(source.slug)
-    try:
-        if not raw_path.exists():
-            raise PreviewUnavailableError("raw file unavailable for preview")
-        try:
-            parsed = connector.parse(raw_path)
-            stage_rows(session, _canonical_rows(parsed.rows))
-        except DBAPIError:
-            raise  # database problems are not a bad raw file
-        except Exception as e:  # noqa: BLE001 - connector parse errors, incl. lazy row generators
-            log.exception("preview of run %s: raw file could not be parsed", run_id)
-            raise PreviewUnavailableError("raw file could not be parsed") from e
-        removed_clause = "OR s.key_hash IS NULL" if parsed.complete else ""
-        where = ["(d.key_hash IS NULL OR s.value_hash <> d.value_hash " + removed_clause + ")"]
-        params: dict = {"sid": source_id, "limit": page_size, "offset": (page - 1) * page_size}
-        if indicator is not None:
-            where.append("COALESCE(s.indicator, d.indicator) = :indicator")
-            params["indicator"] = indicator
-        if country is not None:
-            where.append("COALESCE(s.country, d.country) = :country")
-            params["country"] = country
-        base = f"""
-            SELECT CASE WHEN d.key_hash IS NULL THEN 'added'
-                        WHEN s.key_hash IS NULL THEN 'removed' ELSE 'altered' END AS change_type,
-                COALESCE(s.dataset, d.dataset) AS dataset,
-                COALESCE(s.indicator, d.indicator) AS indicator,
-                COALESCE(s.country, d.country) AS country,
-                COALESCE(s.period, d.period) AS period,
-                COALESCE(s.dims, d.dims) AS dims,
-                COALESCE(s.key_hash, d.key_hash) AS key_hash,
-                d.value_num AS old_num, d.value_text AS old_text,
-                s.value_num AS new_num, s.value_text AS new_text
-            FROM staging s
-            FULL OUTER JOIN (SELECT * FROM data_points WHERE source_id = :sid) d
-                ON d.key_hash = s.key_hash
-            WHERE {" AND ".join(where)}
-        """
-        outer = "WHERE change_type = :change_type" if change_type else ""
-        if change_type:
-            params["change_type"] = change_type
-        total = session.execute(
-            text(f"SELECT count(*) FROM ({base}) c {outer}"), params
-        ).scalar_one()
-        rows = session.execute(
-            text(
-                f"SELECT * FROM ({base}) c {outer} "
-                "ORDER BY indicator, country, period, dataset, key_hash LIMIT :limit OFFSET :offset"
-            ),
-            params,
-        ).mappings().all()
-        items = [
-            {
-                "change_type": r["change_type"], "dataset": r["dataset"],
-                "indicator": r["indicator"], "country": r["country"],
-                "period": r["period"], "dims": r["dims"],
-                "old": r["old_num"] if r["old_num"] is not None else r["old_text"],
-                "new": r["new_num"] if r["new_num"] is not None else r["new_text"],
-            }
-            for r in rows
-        ]
-        return items, total
-    finally:
-        session.rollback()

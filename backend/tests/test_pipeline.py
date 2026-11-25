@@ -17,7 +17,7 @@ class RecordingNotifier:
         self.calls = []
         self.fail = fail
 
-    def notify_run(self, run, source, top_indicators, streak):
+    def notify_run(self, run, source, top_indicators, streak, extras=None):
         if self.fail:
             raise RuntimeError("webhook down")
         self.calls.append((run.status, top_indicators, streak))
@@ -189,7 +189,7 @@ def test_errors_are_redacted_and_truncated(env, db_session):
     assert len(run.error) <= 2000
 
     n = RecordingNotifier()
-    n.notify_run = lambda *a: (_ for _ in ()).throw(ValueError("see https://h/SECRET"))
+    n.notify_run = lambda *a, **k: (_ for _ in ()).throw(ValueError("see https://h/SECRET"))
     conn.download = FakeConnector().download
     conn.rows = [raw("AT", "2020", 1)]
     run = pipeline.run_source(sf, "fake", notifier=n)
@@ -307,3 +307,22 @@ def test_suspect_pending_does_not_upsert_indicators_until_approved(env, db_sessi
     pipeline.approve_run(sf, run.id)
     db_session.expire_all()
     assert db_session.scalar(name) == "Indicator I"
+
+
+def test_prune_spares_queued_raw_file(env, db_session, tmp_path):
+    from pathlib import Path
+    from app.core import raw_store
+
+    src, conn, sf = env
+    f = tmp_path / "up.json"
+    f.write_text("x")
+    old = Run(source_id=src.id, status="queued", trigger="upload", raw_path=str(f))
+    db_session.add(old)
+    db_session.flush()
+    for i in range(2):
+        g = tmp_path / f"n{i}.json"
+        g.write_text("x")
+        db_session.add(Run(source_id=src.id, status="ok", raw_path=str(g)))
+    db_session.flush()
+    raw_store.prune(db_session, src.id, 1)
+    assert Path(old.raw_path).exists()

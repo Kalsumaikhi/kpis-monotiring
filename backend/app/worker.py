@@ -11,10 +11,10 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from sqlalchemy import select, update
 
-from app.connectors.registry import CONNECTORS, sync_sources
+from app.connectors.registry import resolve_connector, sync_sources
 from app.core.pipeline import (
     Notifier, RunNotQueuedError, SessionFactory, SourceBusyError, _acquire_source_lock,
-    _safe_error, run_source,
+    _safe_error, approve_run, run_source,
 )
 from app.models import Run, Source
 
@@ -46,7 +46,9 @@ def reload_jobs(scheduler: BackgroundScheduler, session_factory: SessionFactory,
         sources = session.scalars(select(Source).where(Source.enabled.is_(True))).all()
         wanted: dict[str, str] = {}
         for s in sources:
-            if s.slug not in CONNECTORS:
+            try:
+                resolve_connector(session, s.slug)
+            except KeyError:
                 log.warning("source %s has no registered connector; skipping", s.slug)
                 continue
             wanted[s.slug] = s.cron
@@ -74,21 +76,27 @@ def reload_jobs(scheduler: BackgroundScheduler, session_factory: SessionFactory,
 
 
 def poll_queued_once(session_factory: SessionFactory, notifier: Notifier | None) -> int:
-    """Execute every queued run (oldest first); returns how many were started."""
+    """Execute queued runs and apply approve_queued ones (oldest first); returns how many ran."""
     session = session_factory()
     try:
         queued = session.execute(
-            select(Run.id, Run.trigger, Source.slug)
+            select(Run.id, Run.trigger, Source.slug, Run.status, Run.raw_path)
             .join(Source, Source.id == Run.source_id)
-            .where(Run.status == "queued")
+            .where(Run.status.in_(("queued", "approve_queued")))
             .order_by(Run.id)
         ).all()
     finally:
         session.close()
     started = 0
-    for run_id, trigger, slug in queued:
+    for run_id, trigger, slug, status, raw_path in queued:
+        if status == "approve_queued":
+            if _approve_queued(session_factory, run_id, slug, notifier):
+                started += 1
+            continue
         try:
-            run_source(session_factory, slug, trigger=trigger, notifier=notifier, run_id=run_id)
+            upload = trigger == "upload"  # user-supplied file: copy it, then hold for review
+            run_source(session_factory, slug, trigger=trigger, notifier=notifier, run_id=run_id,
+                       from_raw=raw_path if upload else None, force_hold=upload)
             started += 1
         except SourceBusyError:
             log.info("source %s busy; run %s stays queued", slug, run_id)
@@ -101,6 +109,30 @@ def poll_queued_once(session_factory: SessionFactory, notifier: Notifier | None)
             except Exception:  # noqa: BLE001
                 log.exception("could not mark run %s failed", run_id)
     return started
+
+
+def _approve_queued(session_factory: SessionFactory, run_id: int, slug: str,
+                    notifier: Notifier | None) -> bool:
+    try:
+        approve_run(session_factory, run_id, notifier)
+        return True
+    except SourceBusyError:
+        log.info("source %s busy; run %s stays approve_queued", slug, run_id)
+    except Exception as e:  # noqa: BLE001
+        log.exception("approve of run %s (%s) failed", run_id, slug)
+        try:
+            session = session_factory()
+            try:
+                session.execute(
+                    update(Run).where(Run.id == run_id, Run.status == "approve_queued")
+                    .values(status="suspect_pending", error=_safe_error(e))
+                )
+                session.commit()
+            finally:
+                session.close()
+        except Exception:  # noqa: BLE001
+            log.exception("could not return run %s to suspect_pending", run_id)
+    return False
 
 
 def _mark_failed(session_factory: SessionFactory, run_id: int, error: str) -> None:

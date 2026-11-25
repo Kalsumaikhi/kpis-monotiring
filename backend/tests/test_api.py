@@ -76,7 +76,8 @@ def test_sources_list_shape(client, db_session, source):
     assert len(items) == 1
     s = items[0]
     assert set(s) == {"slug", "name", "area", "access", "enabled", "cron", "last_run",
-                      "last_change_at", "rows_tracked", "changes_30d", "failing_streak"}
+                      "last_change_at", "rows_tracked", "changes_30d", "failing_streak",
+                      "attribution", "incomplete", "noisy_targets", "last_success_at"}
     assert s["rows_tracked"] == 2
     assert s["changes_30d"] == 1
     assert s["failing_streak"] == 2
@@ -85,8 +86,32 @@ def test_sources_list_shape(client, db_session, source):
     assert s["last_run"]["status"] == "failed"
 
 
+def test_sources_last_success_ignores_running_latest(client, db_session, source):
+    t = datetime(2026, 11, 1, 12, tzinfo=timezone.utc)
+    db_session.add_all([
+        Run(source_id=source.id, status="ok", finished_at=t),
+        Run(source_id=source.id, status="failed", finished_at=t + timedelta(days=1)),
+        Run(source_id=source.id, status="running"),
+    ])
+    db_session.commit()
+    s = client.get("/api/sources").json()[0]
+    assert s["last_run"]["status"] == "running"
+    assert s["last_success_at"].startswith("2026-11-01T12:00:00")
+
+
+def test_sources_last_success_orders_by_finished_at(client, db_session, source):
+    newer = datetime(2026, 11, 5, 12, tzinfo=timezone.utc)
+    db_session.add(Run(source_id=source.id, status="ok", finished_at=newer))
+    db_session.flush()
+    db_session.add(Run(source_id=source.id, status="ok", finished_at=newer - timedelta(days=3)))
+    db_session.commit()
+    s = client.get("/api/sources").json()[0]
+    assert s["last_success_at"].startswith("2026-11-05T12:00:00")
+
+
 def test_sources_list_source_without_runs(client, source):
     s = client.get("/api/sources").json()[0]
+    assert s["last_success_at"] is None
     assert s["last_run"] is None and s["last_change_at"] is None
     assert (s["rows_tracked"], s["changes_30d"], s["failing_streak"]) == (0, 0, 0)
 
@@ -139,6 +164,19 @@ def test_runs_pagination_and_filter(client, db_session, source):
     assert f["total"] == 30 and all(i["status"] == "failed" for i in f["items"])
     assert client.get("/api/runs?source=nope").json()["total"] == 0
     assert client.get("/api/runs?page_size=201").status_code == 422
+
+
+def test_runs_has_changes_filter(client, db_session, source):
+    db_session.add_all([
+        Run(source_id=source.id, status="ok", added=1),
+        Run(source_id=source.id, status="ok", removed=2),
+        Run(source_id=source.id, status="no_change"),
+    ])
+    db_session.commit()
+    assert client.get("/api/runs").json()["total"] == 3
+    r = client.get("/api/runs?has_changes=true").json()
+    assert r["total"] == 2 and all(i["added"] + i["removed"] > 0 for i in r["items"])
+    assert client.get("/api/runs?has_changes=false").json()["total"] == 3
 
 
 def _run_with_changes(db_session, source):
@@ -204,37 +242,16 @@ def pending(db_session, session_factory, monkeypatch):
     return src, run
 
 
-def test_preview_changes_does_not_write(db_session, pending):
-    src, run = pending
-    before = db_session.scalar(select(Change.id).limit(1))
-    dp_before = db_session.scalar(select(func.count()).select_from(DataPoint))
-    items, total = pipeline.preview_changes(db_session, run.id)
-    assert total == 4
-    by = {(i["change_type"], i["country"]): i for i in items}
-    assert set(by) == {("altered", "BE"), ("added", "FR"), ("removed", "DE"), ("removed", "ES")}
-    assert by[("altered", "BE")]["old"] == Decimal("1") and by[("altered", "BE")]["new"] == Decimal("9")
-    assert by[("removed", "DE")]["new"] is None and by[("added", "FR")]["old"] is None
-    assert db_session.scalar(select(Change.id).limit(1)) == before  # nothing recorded
-    assert db_session.scalar(select(func.count()).select_from(DataPoint)) == dp_before
-    assert db_session.get(Run, run.id).status == "suspect_pending"
-    items, total = pipeline.preview_changes(db_session, run.id, change_type="removed", page_size=1)
-    assert total == 2 and len(items) == 1
-    _, total = pipeline.preview_changes(db_session, run.id, country="FR")
-    assert total == 1
-    _, total = pipeline.preview_changes(db_session, run.id, indicator="other")
-    assert total == 0
-    with pytest.raises(ValueError):
-        pipeline.preview_changes(db_session, run.id + 1000)
-
-
-def test_pending_run_changes_endpoint_and_approve(client, db_session, pending):
+def test_pending_run_changes_endpoint_and_approve(client, db_session, session_factory, pending):
     src, run = pending
     r = client.get(f"/api/runs/{run.id}/changes?change_type=removed").json()
     assert r["pending"] is True and r["total"] == 2
     assert {i["country"] for i in r["items"]} == {"DE", "ES"}
     assert r["items"][0]["old"] == "1"
     a = client.post(f"/api/runs/{run.id}/approve")
-    assert a.status_code == 200 and a.json()["status"] == "ok"
+    assert a.status_code == 202 and a.json()["status"] == "approve_queued"
+    from app.worker import poll_queued_once
+    poll_queued_once(session_factory, None)
     after = client.get(f"/api/runs/{run.id}/changes").json()
     assert "pending" not in after and after["total"] == 4
 
@@ -246,32 +263,11 @@ def test_reject_pending(client, db_session, pending):
     assert client.post(f"/api/runs/{run.id}/reject").status_code == 409
 
 
-def test_approve_and_reject_source_busy_409(client, pending, held_lock):
+def test_reject_source_busy_409(client, pending, held_lock):
     src, run = pending
     held_lock(src.id)
-    r = client.post(f"/api/runs/{run.id}/approve")
-    assert r.status_code == 409 and r.json()["detail"] == "source busy"
     r = client.post(f"/api/runs/{run.id}/reject")
     assert r.status_code == 409 and r.json()["detail"] == "source busy"
-
-
-def test_preview_missing_raw_file_409(client, db_session, pending):
-    import os
-    _, run = pending
-    os.remove(db_session.get(Run, run.id).raw_path)
-    r = client.get(f"/api/runs/{run.id}/changes")
-    assert r.status_code == 409 and r.json()["detail"] == "raw file unavailable for preview"
-
-
-def test_preview_unparseable_raw_file_409(client, db_session, pending, monkeypatch):
-    _, run = pending
-
-    def boom(raw):
-        raise RuntimeError("bad file")
-
-    monkeypatch.setattr(registry.CONNECTORS["fake"], "parse", boom)
-    r = client.get(f"/api/runs/{run.id}/changes")
-    assert r.status_code == 409 and r.json()["detail"] == "raw file could not be parsed"
 
 
 def _api_routes():
@@ -296,15 +292,3 @@ def test_second_queued_insert_is_409(client, db_session, source, monkeypatch):
     db_session.commit()
     monkeypatch.setattr("app.api.routes_sources._has_open_run", lambda *a: False)
     assert client.post(f"/api/sources/{source.slug}/run").status_code == 409
-
-
-def test_preview_db_error_is_not_a_409(db_session, pending, monkeypatch):
-    from sqlalchemy.exc import OperationalError
-    _, run = pending
-
-    def down(*a, **k):
-        raise OperationalError("stmt", {}, Exception("db down"))
-
-    monkeypatch.setattr(pipeline, "stage_rows", down)
-    with pytest.raises(OperationalError):
-        pipeline.preview_changes(db_session, run.id)
