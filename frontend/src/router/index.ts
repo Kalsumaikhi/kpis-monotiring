@@ -1,5 +1,6 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import { hasPassword } from '../api/auth'
+import { safeNext } from './safeNext'
 
 const router = createRouter({
   history: createWebHistory(),
@@ -24,8 +25,7 @@ const router = createRouter({
 router.beforeEach((to) => {
   if (to.meta.public) {
     if (to.path === '/login' && hasPassword()) {
-      const n = Array.isArray(to.query.next) ? to.query.next[0] : to.query.next
-      return typeof n === 'string' && n.startsWith('/') && !n.startsWith('//') && !n.startsWith('/\\') && !n.startsWith('/login') ? n : '/'
+      return safeNext(to.query.next)
     }
     return true
   }

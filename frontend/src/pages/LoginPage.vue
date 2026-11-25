@@ -3,6 +3,7 @@ import { ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ApiError, apiGet, clearPassword, setPassword } from '../api/client'
 import { takeLoginMessage } from '../api/auth'
+import { safeNext } from '../router/safeNext'
 import type { Source } from '../api/types'
 
 const route = useRoute()
@@ -11,12 +12,7 @@ const password = ref('')
 const busy = ref(false)
 const error = ref<string | null>(takeLoginMessage())
 
-function target(): string {
-  const n = route.query.next
-  const s = Array.isArray(n) ? n[0] : n
-  // only same-site paths, never //host or a scheme
-  return typeof s === 'string' && s.startsWith('/') && !s.startsWith('//') && !s.startsWith('/\\') && !s.startsWith('/login') ? s : '/'
-}
+const target = () => safeNext(route.query.next)
 
 async function submit() {
   if (!password.value || busy.value) return

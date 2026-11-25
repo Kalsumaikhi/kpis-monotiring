@@ -9,12 +9,15 @@ const emit = defineEmits<{ confirm: []; cancel: [] }>()
 const cancelBtn = ref<HTMLButtonElement | null>(null)
 const dialog = ref<HTMLElement | null>(null)
 let opener: HTMLElement | null = null
+let wasOpen = false
 
 const FOCUSABLE = 'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
 
 function onKey(e: KeyboardEvent) {
   if (e.key === 'Escape') {
+    // capture phase + stopImmediatePropagation: no other Escape handler (e.g. the drawer) also fires
     e.preventDefault()
+    e.stopImmediatePropagation()
     emit('cancel')
     return
   }
@@ -40,12 +43,14 @@ watch(
   () => props.open,
   async (o) => {
     if (o) {
+      wasOpen = true
       opener = document.activeElement as HTMLElement | null
-      document.addEventListener('keydown', onKey)
+      document.addEventListener('keydown', onKey, true)
       await nextTick()
       cancelBtn.value?.focus() // the safe choice
-    } else {
-      document.removeEventListener('keydown', onKey)
+    } else if (wasOpen) {
+      wasOpen = false
+      document.removeEventListener('keydown', onKey, true)
       const target = opener && opener.isConnected ? opener : document.querySelector<HTMLElement>('main')
       target?.focus()
       opener = null
@@ -53,7 +58,7 @@ watch(
   },
   { immediate: true },
 )
-onBeforeUnmount(() => document.removeEventListener('keydown', onKey))
+onBeforeUnmount(() => document.removeEventListener('keydown', onKey, true))
 </script>
 
 <template>

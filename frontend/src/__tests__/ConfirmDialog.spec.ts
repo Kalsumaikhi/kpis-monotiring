@@ -31,6 +31,7 @@ describe('ConfirmDialog', () => {
     expect(dlg.getAttribute('aria-labelledby')).toBe('cd-title')
     const [cancel, confirm] = Array.from(dlg.querySelectorAll('button'))
     expect(document.activeElement).toBe(cancel)
+    expect(cancel.textContent).toBe('Cancel')
 
     confirm.focus()
     press('Tab')
@@ -53,10 +54,24 @@ describe('ConfirmDialog mounted open', () => {
     await flushPromises()
     const cancel = document.body.querySelector('[role="dialog"] button') as HTMLElement
     expect(document.activeElement).toBe(cancel)
+    expect(cancel.textContent).toBe('Cancel')
     const ev = new KeyboardEvent('keydown', { key: 'Escape', cancelable: true, bubbles: true })
     document.dispatchEvent(ev)
     expect(ev.defaultPrevented).toBe(true)
     expect(w.emitted('cancel')).toHaveLength(1)
     w.unmount()
+  })
+})
+
+describe('ConfirmDialog mounted closed', () => {
+  it('does not steal focus', async () => {
+    const input = document.createElement('input')
+    document.body.appendChild(input)
+    input.focus()
+    const w = mount(ConfirmDialog, { props: { open: false, title: 'Sure?' }, attachTo: document.body })
+    await flushPromises()
+    expect(document.activeElement).toBe(input)
+    w.unmount()
+    input.remove()
   })
 })
