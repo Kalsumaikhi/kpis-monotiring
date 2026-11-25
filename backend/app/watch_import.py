@@ -17,22 +17,60 @@ class SheetError(ValueError):
 
 
 def _norm(h) -> str:
-    return re.sub(r"\s+", " ", str(h or "").replace("﻿", "")).strip().lower()
+    """Header key: case and all whitespace ignored ("SourceName" == "Source  name")."""
+    return re.sub(r"\s+", "", str(h or "").replace("﻿", "")).lower()
 
 
 def _cell(v) -> str:
     return "" if v is None else str(v).strip()
 
 
+
+def _read_limit() -> int:
+    """Header plus one row too many: enough to reject an oversized sheet without reading it all."""
+    return MAX_ROWS + 2
+
+_HYPERLINK_FORMULA = re.compile(r'^=\s*HYPERLINK\(\s*"((?:[^"]|"")*)"', re.IGNORECASE)
+
+
 def _xlsx_rows(data: bytes) -> list[list]:
     try:
         wb = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True)
         try:
-            return [list(r) for r in wb.worksheets[0].iter_rows(values_only=True)]
+            rows = []
+            for r in wb.worksheets[0].iter_rows(values_only=True):
+                rows.append(list(r))
+                if len(rows) >= _read_limit():
+                    break
+            return rows
         finally:
             wb.close()
     except Exception as e:  # noqa: BLE001 - any parser failure is a bad upload
         raise SheetError("unreadable Excel file") from e
+
+
+def _xlsx_link_targets(data: bytes, col: int, last_row: int) -> dict[int, str]:
+    """URL behind each Link cell that is a hyperlink (display text such as "Click here")
+    or a =HYPERLINK("url", "text") formula, keyed by sheet row.
+
+    Read-only mode exposes neither, so this loads the sheet normally with formulas kept;
+    it runs only after _xlsx_rows has bounded the row count."""
+    try:
+        wb = openpyxl.load_workbook(io.BytesIO(data), data_only=False)
+    except Exception as e:  # noqa: BLE001
+        raise SheetError("unreadable Excel file") from e
+    try:
+        out: dict[int, str] = {}
+        ws = wb.worksheets[0]
+        for (cell,) in ws.iter_rows(min_row=2, max_row=last_row, min_col=col + 1, max_col=col + 1):
+            link = cell.hyperlink
+            if link is not None and link.target:
+                out[cell.row] = link.target
+            elif isinstance(cell.value, str) and (m := _HYPERLINK_FORMULA.match(cell.value)):
+                out[cell.row] = m.group(1).replace('""', '"')
+        return out
+    finally:
+        wb.close()
 
 
 def _csv_rows(data: bytes) -> list[list]:
@@ -43,7 +81,12 @@ def _csv_rows(data: bytes) -> list[list]:
     first = text.split("\n", 1)[0]
     delim = max(",;\t", key=first.count) if any(d in first for d in ",;\t") else ","
     try:
-        return [list(r) for r in csv.reader(io.StringIO(text), delimiter=delim)]
+        rows = []
+        for r in csv.reader(io.StringIO(text), delimiter=delim):
+            rows.append(list(r))
+            if len(rows) >= _read_limit():
+                break
+        return rows
     except csv.Error as e:
         raise SheetError("unreadable CSV file") from e
 
@@ -54,7 +97,8 @@ def parse_sheet(filename: str, data: bytes) -> list[dict]:
     Blank rows are skipped. Raises SheetError for an unknown type or a missing column.
     """
     name = filename.lower()
-    if name.endswith(".xlsx"):
+    is_xlsx = name.endswith(".xlsx")
+    if is_xlsx:
         grid = _xlsx_rows(data)
     elif name.endswith(".csv"):
         grid = _csv_rows(data)
@@ -70,9 +114,12 @@ def parse_sheet(filename: str, data: bytes) -> list[dict]:
         index[key] = header.index(_norm(label))
     if len(grid) - 1 > MAX_ROWS:
         raise SheetError(f"too many rows (max {MAX_ROWS})")
+    links = _xlsx_link_targets(data, index["url"], len(grid)) if is_xlsx and len(grid) > 1 else {}
     rows = []
     for n, raw in enumerate(grid[1:], start=2):
         vals = {k: _cell(raw[i]) if i < len(raw) else "" for k, i in index.items()}
+        if n in links:
+            vals["url"] = links[n].strip()
         if not any(vals.values()):
             continue
         rows.append({"row": n, **vals})

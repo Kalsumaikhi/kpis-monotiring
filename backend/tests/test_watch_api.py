@@ -421,3 +421,54 @@ def test_harmless_edit_keeps_held_runs(client, db_session, session_factory):
     held = db_session.get(Run, held.id)
     db_session.refresh(held)
     assert held.status == "suspect_pending"
+
+
+# --- import parsing: headers, row limit, hyperlinks ------------------------------
+
+def test_header_match_ignores_all_spaces_and_case():
+    data = b"SourceName;KPIname; L i n k \nA;K;https://x/\n"
+    assert watch_import.parse_sheet("a.csv", data) == [
+        {"row": 2, "source_name": "A", "kpi_name": "K", "url": "https://x/"}]
+    rows = watch_import.parse_sheet("a.xlsx", xlsx([("A", "K", "https://x/")],
+                                                   header=("SOURCENAME", "Kpi Name", "link")))
+    assert rows[0]["url"] == "https://x/"
+
+
+@pytest.mark.parametrize("ext", ["csv", "xlsx"])
+def test_import_stops_reading_after_max_rows(monkeypatch, ext):
+    monkeypatch.setattr(watch_import, "MAX_ROWS", 3)
+    body = [("A", f"K{i}", f"https://x/{i}") for i in range(50)]
+    if ext == "csv":
+        data = ("Source name,KPI name,Link\n" + "".join(f"{a},{k},{u}\n" for a, k, u in body)).encode()
+        assert len(watch_import._csv_rows(data)) == 5  # header + MAX_ROWS + 1, not 51
+    else:
+        data = xlsx(body)
+        assert len(watch_import._xlsx_rows(data)) == 5
+    with pytest.raises(watch_import.SheetError, match="too many rows"):
+        watch_import.parse_sheet(f"a.{ext}", data)
+    # exactly MAX_ROWS is fine
+    if ext == "csv":
+        ok = b"Source name,KPI name,Link\n" + b"".join(f"A,{k},{u}\n".encode() for _, k, u in body[:3])
+    else:
+        ok = xlsx(body[:3])
+    assert len(watch_import.parse_sheet(f"a.{ext}", ok)) == 3
+
+
+def test_xlsx_hyperlink_cells_use_the_link_target():
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(["Source name", "KPI name", "Link"])
+    ws.append(["A", "Linked", "Click here"])
+    ws["C2"].hyperlink = "https://h.example/target"
+    ws.append(["A", "Formula", '=HYPERLINK("https://h.example/f?q=""x""","Go")'])
+    ws.append(["A", "Plain", "https://h.example/plain"])
+    ws.append(["A", "Lower", '=hyperlink( "https://h.example/low" )'])
+    buf = io.BytesIO()
+    wb.save(buf)
+    rows = watch_import.parse_sheet("s.xlsx", buf.getvalue())
+    assert [(r["kpi_name"], r["url"]) for r in rows] == [
+        ("Linked", "https://h.example/target"),
+        ("Formula", 'https://h.example/f?q="x"'),
+        ("Plain", "https://h.example/plain"),
+        ("Lower", "https://h.example/low"),
+    ]
