@@ -1,0 +1,113 @@
+/*
+ * Design tokens. Every colour in the app comes from here; components never hard-code one.
+ *
+ * Palette (spec): Dark Green #063B2B, Spring Green #05EA7D, Mid Green #00874F, Light Green #E8F2DD.
+ * Spring Green is an accent for Dark Green surfaces only (active nav item, dark-theme accent).
+ *
+ * Contrast ratios (WCAG, text vs surface), computed from the values below.
+ *
+ * LIGHT   (--bg #E8F2DD, --surface #FFFFFF)
+ *   text/bg            10.90    text #063B2B
+ *   text/surface       12.59
+ *   text-muted/surface  7.07    #3F5F52  (6.12 on --bg)
+ *   accent/surface      4.59    #00874F  (white on --btn-bg is also 4.59)
+ *   status-ok/surface   4.59    #00874F
+ *   status-warn/surface 6.33    #8A5300  (amber, dark enough for text)
+ *   status-fail/surface 6.54    #B3261E
+ *   nav-text/nav-bg     9.36    #CFE3D6 on #063B2B
+ *   nav-active/nav-bg   7.84    #05EA7D on #063B2B
+ *   Note: Mid Green on the Light Green page tint is only 3.97, so accent text is used on
+ *   --surface (cards, tables, forms) and page-level text on --bg uses --text / --text-muted.
+ *
+ * DARK    (--bg #04211A, --surface #0A3022; surfaces derived from Dark Green)
+ *   text/bg            14.69    #E8F2DD
+ *   text/surface       12.46
+ *   text-muted/surface  7.71    #A9C4B5
+ *   accent/surface      8.96    #05EA7D
+ *   status-ok/surface   7.69    #3FD68E
+ *   status-warn/surface 7.74    #F2B340
+ *   status-fail/surface 6.31    #FF8A80
+ *   nav-text/nav-bg    11.77    #BFD6C8 on #031A14
+ *   nav-active/nav-bg  11.25    #05EA7D on #031A14
+ */
+:root {
+  --c-dark-green: #063b2b;
+  --c-spring-green: #05ea7d;
+  --c-mid-green: #00874f;
+  --c-light-green: #e8f2dd;
+
+  --bg: #e8f2dd;
+  --surface: #ffffff;
+  --surface-2: #f3f8ee;
+  --text: #063b2b;
+  --text-muted: #3f5f52;
+  --border: #c5d7bd;
+  --accent: #00874f;
+  --btn-bg: #00874f;
+  --btn-text: #ffffff;
+  --nav-bg: #063b2b;
+  --nav-text: #cfe3d6;
+  --nav-active: #05ea7d;
+  --nav-hover: rgba(255, 255, 255, 0.08);
+  --status-ok: #00874f;
+  --status-warn: #8a5300;
+  --status-fail: #b3261e;
+  --chg-added: #00874f;
+  --chg-altered: #8a5300;
+  --chg-removed: #b3261e;
+  --focus: #00874f;
+  --shadow: 0 1px 2px rgba(6, 59, 43, 0.08);
+  --overlay: rgba(4, 33, 26, 0.55);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    --bg: #04211a;
+    --surface: #0a3022;
+    --surface-2: #08281d;
+    --text: #e8f2dd;
+    --text-muted: #a9c4b5;
+    --border: #1d5240;
+    --accent: #05ea7d;
+    --btn-bg: #00874f;
+    --btn-text: #ffffff;
+    --nav-bg: #031a14;
+    --nav-text: #bfd6c8;
+    --nav-active: #05ea7d;
+    --nav-hover: rgba(255, 255, 255, 0.07);
+    --status-ok: #3fd68e;
+    --status-warn: #f2b340;
+    --status-fail: #ff8a80;
+    --chg-added: #3fd68e;
+    --chg-altered: #f2b340;
+    --chg-removed: #ff8a80;
+    --focus: #05ea7d;
+    --shadow: none;
+    --overlay: rgba(0, 0, 0, 0.6);
+  }
+}
+
+:root[data-theme='dark'] {
+  --bg: #04211a;
+  --surface: #0a3022;
+  --surface-2: #08281d;
+  --text: #e8f2dd;
+  --text-muted: #a9c4b5;
+  --border: #1d5240;
+  --accent: #05ea7d;
+  --btn-bg: #00874f;
+  --btn-text: #ffffff;
+  --nav-bg: #031a14;
+  --nav-text: #bfd6c8;
+  --nav-active: #05ea7d;
+  --nav-hover: rgba(255, 255, 255, 0.07);
+  --status-ok: #3fd68e;
+  --status-warn: #f2b340;
+  --status-fail: #ff8a80;
+  --chg-added: #3fd68e;
+  --chg-altered: #f2b340;
+  --chg-removed: #ff8a80;
+  --focus: #05ea7d;
+  --shadow: none;
+  --overlay: rgba(0, 0, 0, 0.6);
+}
