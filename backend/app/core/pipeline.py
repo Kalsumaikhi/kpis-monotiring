@@ -318,17 +318,29 @@ class _KeyState:
         self.cred = cred
         self.hosts = {h.lower() for h in hosts}
         self.rejected: int | None = None
+        self.sent = False
 
     def on_request(self, request: httpx.Request) -> None:
-        # Called for every hop, so a redirect to another host (or to http) loses the key.
-        if request.url.scheme != "https" or request.url.host.lower() not in self.hosts:
-            return
+        # Called for every hop. httpx copies earlier headers onto redirect requests, so an
+        # ineligible hop (other host, or http) must have our key removed, not just not added.
+        request.extensions = {**request.extensions, "kpi_keyed": False}
         url, headers = creds.apply(self.cred, str(request.url), {})
-        if url != str(request.url):
-            request.url = httpx.URL(url)
-        for k, v in headers.items():
-            request.headers[k] = v
-        request.extensions["kpi_keyed"] = True
+        if request.url.scheme == "https" and request.url.host.lower() in self.hosts:
+            if url != str(request.url):
+                request.url = httpx.URL(url)
+            for k, v in headers.items():
+                request.headers[k] = v
+            request.extensions["kpi_keyed"] = True
+            self.sent = True
+            return
+        for k, v in headers.items():  # strip only what carries our secret
+            if request.headers.get(k) == v:
+                del request.headers[k]
+        if self.cred.kind == "query" and self.cred.param_name:
+            params = [(k, v) for k, v in request.url.params.multi_items()
+                      if not (k == self.cred.param_name and v == self.cred.secret)]
+            if len(params) != len(request.url.params.multi_items()):
+                request.url = request.url.copy_with(params=params)
 
     def on_response(self, response: httpx.Response) -> None:
         if response.request.extensions.get("kpi_keyed") and response.status_code in (401, 403) \
@@ -397,6 +409,7 @@ def run_source(
         run_id = run.id
 
         cred = None
+        state = None
         key_id = source.credential_id if _key_hosts(connector) and from_raw is None else None
         key_error: str | None = None
         try:
@@ -410,7 +423,6 @@ def run_source(
                     shutil.copyfile(from_raw, dest)
             else:
                 hooks: dict = {}
-                state = None
                 if key_id is not None:
                     cred = _load_key(session, key_id)
                     state = _KeyState(cred, _key_hosts(connector))
@@ -424,16 +436,23 @@ def run_source(
                     raise
                 if state is not None and state.rejected is not None:
                     raise _KeyFailure(f"key rejected (HTTP {state.rejected})")
+                if cred is not None and dest.exists():  # the raw file must not hold the secret
+                    data = dest.read_bytes()
+                    clean = creds.redact_bytes(data, cred)
+                    if clean != data:
+                        dest.write_bytes(clean)
         except Exception as e:  # noqa: BLE001
             if isinstance(e, _KeyFailure):
                 key_error = str(e)
             run = _fail(session, run_id, e, cred, message=key_error)
-            _record_key_use(session, key_id, key_error)
+            if key_error is not None:  # an unrelated failure says nothing about the key
+                _record_key_use(session, key_id, key_error)
             _on_failed(session, connector, run)
             _notify(session, run, notifier)
             return _detach(session, run)
 
-        _record_key_use(session, key_id, None)
+        if key_id is not None and cred is not None and state is not None and state.sent:
+            _record_key_use(session, key_id, None)
 
         try:
             parsed = connector.parse(dest)

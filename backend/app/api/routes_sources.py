@@ -175,8 +175,11 @@ def patch_source(slug: str, body: SourcePatch, session: Session = Depends(get_se
     if body.enabled is not None:
         source.enabled = body.enabled
     if "credential_id" in body.model_fields_set:
-        if body.credential_id is not None and session.get(Credential, body.credential_id) is None:
-            raise HTTPException(422, "unknown key")
+        if body.credential_id is not None:
+            if source.access == "watch":
+                raise HTTPException(422, "this source doesn't use keys")
+            if session.get(Credential, body.credential_id) is None:
+                raise HTTPException(422, "unknown key")
         source.credential_id = body.credential_id
     session.commit()
     return {"slug": source.slug, "enabled": source.enabled, "cron": source.cron,

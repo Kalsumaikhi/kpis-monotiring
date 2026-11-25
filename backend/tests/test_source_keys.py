@@ -192,3 +192,123 @@ def test_credential_supported_false_without_hosts_and_for_watch(env, db_session,
     items = {i["slug"]: i for i in client.get("/api/sources").json()}
     assert items["fake"]["credential_supported"] is False
     assert items["w"]["credential_supported"] is False
+
+
+def _keyed(db_session, src, **kw):
+    cred = mk_cred(db_session, **kw)
+    src.credential_id = cred.id
+    db_session.flush()
+    return cred
+
+
+@respx.mock
+def test_header_key_dropped_on_cross_host_redirect(env, db_session):
+    src, conn, sf = env
+    _keyed(db_session, src)
+    respx.get("https://api.example.com/data").mock(
+        return_value=httpx.Response(302, headers={"location": "https://cdn.example.org/f"}))
+    respx.get("https://cdn.example.org/f").mock(return_value=httpx.Response(200, text="ok"))
+    pipeline.run_source(sf, "fake")
+    assert respx.calls[0].request.headers["x-key"] == SECRET
+    assert "x-key" not in respx.calls[1].request.headers
+
+
+@respx.mock
+def test_key_dropped_on_https_to_http_same_host(env, db_session):
+    src, conn, sf = env
+    _keyed(db_session, src)
+    respx.get("https://api.example.com/data").mock(
+        return_value=httpx.Response(302, headers={"location": "http://api.example.com/f"}))
+    respx.get("http://api.example.com/f").mock(return_value=httpx.Response(200, text="ok"))
+    pipeline.run_source(sf, "fake")
+    assert "x-key" not in respx.calls[1].request.headers
+
+
+@respx.mock
+def test_basic_key_dropped_on_cross_host_redirect(env, db_session):
+    src, conn, sf = env
+    _keyed(db_session, src, kind="basic", header_name=None, username="u")
+    respx.get("https://api.example.com/data").mock(
+        return_value=httpx.Response(302, headers={"location": "https://cdn.example.org/f"}))
+    respx.get("https://cdn.example.org/f").mock(return_value=httpx.Response(200, text="ok"))
+    pipeline.run_source(sf, "fake")
+    assert respx.calls[0].request.headers["authorization"].startswith("Basic ")
+    assert "authorization" not in respx.calls[1].request.headers
+
+
+@respx.mock
+def test_unkeyed_hop_401_is_not_key_rejected(env, db_session):
+    src, conn, sf = env
+    cred = _keyed(db_session, src)
+    respx.get("https://api.example.com/data").mock(
+        return_value=httpx.Response(302, headers={"location": "https://cdn.example.org/f"}))
+    respx.get("https://cdn.example.org/f").mock(return_value=httpx.Response(401))
+    conn.download = lambda client, dest: (client.get("https://api.example.com/data").raise_for_status(),)
+    run = pipeline.run_source(sf, "fake")
+    assert run.status == "failed" and "key rejected" not in run.error
+    db_session.refresh(cred)
+    assert cred.last_error is None
+
+
+@respx.mock
+def test_raw_file_is_redacted(env, db_session):
+    from urllib.parse import quote_plus
+    src, conn, sf = env
+    secret = "p@ss word+/1"
+    _keyed(db_session, src, secret=secret)
+    respx.get("https://api.example.com/data").mock(return_value=httpx.Response(200, text="ok"))
+
+    def dl(client, dest):
+        client.get("https://api.example.com/data")
+        dest.write_text(f"a {secret} b {quote_plus(secret)} c")
+
+    conn.download = dl
+    run = pipeline.run_source(sf, "fake")
+    text = open(run.raw_path).read()
+    assert secret not in text and quote_plus(secret) not in text and "***" in text
+
+
+@respx.mock
+def test_query_key_replaces_same_name_param(env, db_session):
+    src, conn, sf = env
+    _keyed(db_session, src, kind="query", header_name=None, param_name="apikey")
+    conn.urls = ("https://api.example.com/a?apikey=stale&x=1",)
+    respx.get(url__regex=r".*").mock(return_value=httpx.Response(200, text="ok"))
+    pipeline.run_source(sf, "fake")
+    assert respx.calls[0].request.url.params.get_list("apikey") == [SECRET]
+
+
+def test_parse_warning_is_redacted(env, db_session):
+    src, conn, sf = env
+    _keyed(db_session, src)
+    respx.mock.start()
+    try:
+        respx.get("https://api.example.com/data").mock(return_value=httpx.Response(200, text="ok"))
+        conn.warnings = [f"odd value {SECRET}"]
+        run = pipeline.run_source(sf, "fake")
+    finally:
+        respx.mock.stop()
+    assert run.error and SECRET not in run.error and "***" in run.error
+
+
+@respx.mock
+def test_unrelated_failure_leaves_key_state_alone(env, db_session):
+    src, conn, sf = env
+    cred = _keyed(db_session, src)
+    cred.last_error = "earlier"
+    db_session.flush()
+    respx.get("https://api.example.com/data").mock(return_value=httpx.Response(500))
+    conn.download = lambda client, dest: client.get("https://api.example.com/data").raise_for_status()
+    run = pipeline.run_source(sf, "fake")
+    assert run.status == "failed"
+    db_session.refresh(cred)
+    assert cred.last_error == "earlier" and cred.last_used_at is None
+
+
+def test_patch_watch_source_credential_422(db_session, client):
+    cred = mk_cred(db_session)
+    db_session.add(Source(slug="w", name="W", area="a", access="watch"))
+    db_session.flush()
+    r = client.patch("/api/sources/w", json={"credential_id": cred.id})
+    assert r.status_code == 422 and r.json()["detail"] == "this source doesn't use keys"
+    assert client.patch("/api/sources/w", json={"credential_id": None}).status_code == 200
