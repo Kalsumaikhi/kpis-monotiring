@@ -307,3 +307,22 @@ def test_suspect_pending_does_not_upsert_indicators_until_approved(env, db_sessi
     pipeline.approve_run(sf, run.id)
     db_session.expire_all()
     assert db_session.scalar(name) == "Indicator I"
+
+
+def test_prune_spares_queued_raw_file(env, db_session, tmp_path):
+    from pathlib import Path
+    from app.core import raw_store
+
+    src, conn, sf = env
+    f = tmp_path / "up.json"
+    f.write_text("x")
+    old = Run(source_id=src.id, status="queued", trigger="upload", raw_path=str(f))
+    db_session.add(old)
+    db_session.flush()
+    for i in range(2):
+        g = tmp_path / f"n{i}.json"
+        g.write_text("x")
+        db_session.add(Run(source_id=src.id, status="ok", raw_path=str(g)))
+    db_session.flush()
+    raw_store.prune(db_session, src.id, 1)
+    assert Path(old.raw_path).exists()

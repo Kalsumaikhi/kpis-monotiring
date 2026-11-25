@@ -127,7 +127,7 @@ class WatchConnector:
             name = t["kpi_name"]
             if t["status"] != "ok":
                 failed += 1
-                warnings.append(f"{name}: {t['status']} ({t.get('error')})")
+                warnings.append(f"{name} ({t['status']}: {t.get('error')})")
                 continue
             if "json" in t:
                 for path, leaf in flatten_json(t["json"]).items():
@@ -136,6 +136,9 @@ class WatchConnector:
                 rows.append(RawRow("page", name, "", "", t["sha256"]))
         if targets and failed == len(targets):
             raise RuntimeError("all targets failed")
+        if warnings:  # one summary line, so the pipeline's "incomplete:" handling sees it
+            shown = ", ".join(warnings[:5]) + (", …" if len(warnings) > 5 else "")
+            warnings = [f"incomplete: {len(warnings)} KPI(s) not checked: {shown}"]
         return ParseResult(
             rows=rows,
             complete=failed == 0,

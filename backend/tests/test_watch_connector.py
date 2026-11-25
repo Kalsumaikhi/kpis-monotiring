@@ -216,3 +216,49 @@ def test_unexpected_exception_is_target_error(wenv, db_session, tmp_path, monkey
     WatchConnector(src.id, "custom-x", "X", sf).download(httpx.Client(), dest)
     t = json.loads(dest.read_text())["targets"][0]
     assert t["status"] == "error" and "unexpected" in t["error"]
+
+
+def test_parse_emits_single_incomplete_summary(tmp_path):
+    targets = [page_t(1, "Good", "hello")] + [err_t(i, f"B{i}") for i in range(2, 9)]
+    targets[1]["status"] = "blocked"
+    res = conn().parse(write_raw(tmp_path, targets))
+    assert len(res.warnings) == 1
+    w = res.warnings[0]
+    assert w.startswith("incomplete: 7 KPI(s) not checked: B2 (blocked: HTTP 500), B3 (error: HTTP 500)")
+    assert w.endswith(", …") and "B6" in w and "B7" not in w
+
+
+@respx.mock
+def test_partial_failure_surfaces_end_to_end(wenv, db_session, client_factory=None):
+    from fastapi.testclient import TestClient
+    from app.api import deps
+    from app.api.main import create_app
+    from app.config import get_settings
+
+    src, tgt, sf = wenv
+    db_session.add(WatchTarget(source_id=src.id, kpi_name="Other", url="https://h.example/o"))
+    db_session.flush()
+    respx.get("https://h.example/robots.txt").mock(return_value=httpx.Response(404))
+    respx.get("https://h.example/p").mock(
+        return_value=httpx.Response(200, text="<main>a</main>", headers={"content-type": "text/html"}))
+    o = respx.get("https://h.example/o").mock(return_value=httpx.Response(500))
+
+    class Rec:
+        calls = []
+
+        def notify_run(self, run, source, top, streak, extras=None):
+            self.calls.append(extras["incomplete_note"])
+
+    rec = Rec()
+    run = pipeline.run_source(sf, "custom-x", notifier=rec)
+    assert run.error.startswith("incomplete: 1 KPI(s) not checked: Other (error: HTTP 500)")
+    assert rec.calls == ["1 KPI(s) not checked: Other (error: HTTP 500)"]
+    pipeline.run_source(sf, "custom-x", notifier=rec)  # still incomplete: no second note
+    assert rec.calls[-1] is None
+    get_settings().dashboard_password = "secret"
+    app = create_app()
+    app.dependency_overrides[deps.get_session] = lambda: db_session
+    c = TestClient(app)
+    c.auth = ("u", "secret")
+    item = [s for s in c.get("/api/sources").json() if s["slug"] == "custom-x"][0]
+    assert item["incomplete"] is True

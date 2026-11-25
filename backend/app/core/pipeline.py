@@ -23,7 +23,7 @@ from app.connectors.registry import resolve_connector
 from app.core import raw_store, rollup
 from app.core.canonical import to_canonical
 from app.core.diff import DiffResult, apply_diff, compute_diff, record_pending, stage_rows
-from app.models import Change, DataPoint, PendingChange, Run, Source
+from app.models import Change, DataPoint, PendingChange, Run, Source, WatchTarget
 
 log = logging.getLogger(__name__)
 
@@ -182,8 +182,13 @@ def _notify_extras(session: Session, run: Run) -> dict:
         return extras
     page = list(session.scalars(
         select(Change.indicator).where(Change.run_id == run.id, Change.dataset == "page")
-        .distinct().order_by(Change.indicator)
+        .distinct()
     ))
+    order = {n: i for i, n in enumerate(session.scalars(  # target order, not alphabetical
+        select(WatchTarget.kpi_name).where(WatchTarget.source_id == run.source_id)
+        .order_by(WatchTarget.id)
+    ))}
+    page.sort(key=lambda n: (order.get(n, len(order)), n))
     if page:
         extras["page_kpis"] = page
         extras["excerpt"] = page_excerpt(session, run.source_id, page[0], run.id)
