@@ -48,7 +48,8 @@ def format_run_message(
     )
     note = (extras or {}).get("incomplete_note")
     if note and run.status in ("ok", "no_change", "baseline"):
-        warning = f":warning: **{source.name}** — incomplete fetch: {note[:_MAX_ERROR_CHARS]}"
+        warning = (f":warning: **{source.name}** — incomplete fetch: "
+                   f"{_no_mentions(note[:_MAX_ERROR_CHARS])}")
         return warning if text is None else f"{text}\n\n{warning}"
     return text
 
@@ -65,12 +66,32 @@ def _ok_block(name: str, added: int, altered: int, removed: int, vintage: str | 
     return "\n".join(lines)
 
 
+_ZWSP = "\u200b"
+
+
+def _inline_code(text: str) -> str:
+    """A name as inline code: no Markdown formatting and no @mentions."""
+    return "`" + " ".join(text.split()).replace("`", "'") + "`"
+
+
+def _no_mentions(text: str) -> str:
+    return text.replace("@", "@" + _ZWSP)
+
+
+def _excerpt_line(text: str) -> str:
+    """Untrusted page text inside a ```diff fence: one line, no fence breaks."""
+    return " ".join(text.splitlines()).replace("```", "`" + _ZWSP + "``")
+
+
 def _page_block(name: str, extras: dict, link: str) -> str:
     kpis = extras["page_kpis"]
-    lines = [f"**{name}** — {len(kpis)} KPI page(s) updated: {', '.join(kpis[:_MAX_INDICATORS])}"]
+    shown = ", ".join(_inline_code(k) for k in kpis[:_MAX_INDICATORS])
+    lines = [f"**{name}** — {len(kpis)} KPI page(s) updated: {shown}"]
     excerpt = extras.get("excerpt") or {}
-    lines += [f"+ {x}" for x in excerpt.get("added", [])[:_MAX_EXCERPT_LINES]]
-    lines += [f"- {x}" for x in excerpt.get("removed", [])[:_MAX_EXCERPT_LINES]]
+    diff = [f"+ {_excerpt_line(x)}" for x in excerpt.get("added", [])[:_MAX_EXCERPT_LINES]]
+    diff += [f"- {_excerpt_line(x)}" for x in excerpt.get("removed", [])[:_MAX_EXCERPT_LINES]]
+    if diff:
+        lines += ["```diff", *diff, "```"]
     lines.append(f"[View changes]({link})")
     return "\n".join(lines)
 

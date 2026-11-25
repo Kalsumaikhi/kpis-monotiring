@@ -204,7 +204,7 @@ Attribution: wherever a source's data is shown, its required credit line is disp
 
 **Change details.**
 - For a page change, the stored previous and new snapshots give a short excerpt: up to 5 added lines and 5 removed lines, each trimmed to 200 characters.
-- **Mattermost format for watch sources:** `**{source}** — {n} KPI page(s) updated: {kpi names, max 5}` plus the first excerpt and `[View changes]({link})`. API value changes use the normal format.
+- **Mattermost format for watch sources:** `**{source}** — {n} KPI page(s) updated: {kpi names, max 5, each as inline code}` plus the first excerpt inside a ` ```diff ` fence (page text is untrusted: fence markers inside it are broken up, so it cannot close the fence or trigger @mentions) and `[View changes]({link})`. API value changes use the normal format.
 - The change-frequency view treats each target as a KPI.
 
 **Noise control.** A target whose content changes on most checks is flagged on the dashboard as "noisy", meaning it changed in more than 80% of its last 10 checks, with a hint to set a focus area. No automatic suppression, so the user still sees every change.

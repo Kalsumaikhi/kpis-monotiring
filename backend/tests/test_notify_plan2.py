@@ -35,8 +35,30 @@ def test_watch_page_message_format():
               "excerpt": {"added": ["new line"], "removed": ["old line"]},
               "incomplete_note": None, "api_counts": (0, 0, 0)}
     assert fmt(mk_run(), src, extras=extras) == (
-        "**My Source** — 2 KPI page(s) updated: GDP page, Budget page\n"
-        "+ new line\n- old line\n[View changes](http://dash/runs/7)")
+        "**My Source** — 2 KPI page(s) updated: `GDP page`, `Budget page`\n"
+        "```diff\n+ new line\n- old line\n```\n[View changes](http://dash/runs/7)")
+
+
+def test_watch_message_neutralises_untrusted_text():
+    src = Source(slug="x", name="S", area="custom", access="watch")
+    extras = {"page_kpis": ["@channel price", "a`b"],
+              "excerpt": {"added": ["```\n@all [click](http://evil)", "ok"], "removed": []},
+              "incomplete_note": None, "api_counts": (0, 0, 0)}
+    text = fmt(mk_run(), src, extras=extras)
+    assert text.splitlines()[0] == "**S** — 2 KPI page(s) updated: `@channel price`, `a'b`"
+    lines = text.splitlines()
+    assert lines[1] == "```diff" and lines[4] == "```"
+    assert lines[2] == "+ `\u200b`` @all [click](http://evil)" and lines[3] == "+ ok"
+    assert text.count("```") == 2  # page text cannot close the fence
+
+
+def test_watch_message_without_excerpt_has_no_fence():
+    src = Source(slug="x", name="S", area="custom", access="watch")
+    extras = {"page_kpis": ["K"], "excerpt": None, "incomplete_note": "@here 1 KPI(s) not checked",
+              "api_counts": (0, 0, 0)}
+    text = fmt(mk_run(), src, extras=extras)
+    assert "```" not in text
+    assert text.endswith("incomplete fetch: @\u200bhere 1 KPI(s) not checked")
 
 
 def test_watch_message_caps_names_and_lines_and_joins_api_block():
@@ -47,7 +69,7 @@ def test_watch_message_caps_names_and_lines_and_joins_api_block():
               "incomplete_note": None, "api_counts": (3, 0, 0)}
     text = fmt(mk_run(added=3, altered=7), src, top=[("p", 3)], extras=extras)
     page, api = text.split("\n\n")
-    assert page.startswith("**S** — 7 KPI page(s) updated: K0, K1, K2, K3, K4\n")
+    assert page.startswith("**S** — 7 KPI page(s) updated: `K0`, `K1`, `K2`, `K3`, `K4`\n")
     assert page.count("\n+ ") == 5 and "+ a4" in page and "+ a5" not in page
     assert api == ("**S** — 3 rows added · 0 values revised · 0 removed\n"
                    "Top indicators: p (3)\n[View changes](http://dash/runs/7)")
