@@ -28,6 +28,9 @@
 - **Network failure:** a live check that cannot reach the host (proxy refusal) gets a BLOCKED report for that connector, never invented formats.
 - **Labels:** `area` is one of economic, military, social, cultural or political, matching the feed filter.
 - **Never touch the dev DB `kpi`.**
+- **Areas** are free text and the change-feed filter reads them from the sources (Plan 3a), so any of the five labels works without code changes.
+- **Sources that already hold a key** (Plan 3a final review, M9): when a connector starts declaring `credential_hosts`, any source that already holds a key gets `needs_baseline=true` and `needs_baseline_at=clock_timestamp()` on its first run. The rule: the source has a `credential_id` and no previous keyed run. The point is that keyed data is never diffed against data fetched without the key. This lives in Task 1's shared helper.
+- **Every POST/PATCH/DELETE** to the API, in tests and in scripts, sends `X-Requested-With: kpi-monitor`.
 
 ## Review Focus
 
