@@ -100,8 +100,9 @@ def _load_migration(filename: str, modname: str):
 
 
 def test_migration_0010_dedupes_kpi_names_then_adds_unique_index(db_session, caplog):
-    """Duplicate KPI names in one source (case-insensitive) get " (2)", " (3)" in id order;
-    the renamed KPIs (and any KPI left sharing their exact old name) baseline silently."""
+    """Duplicate KPI names in one source (case-insensitive) get " (2)", " (3)" in id order.
+    A renamed KPI that alone held its exact name keeps its rows, re-keyed to the new name; for
+    an exact-name clash the shared rows are dropped and every KPI that used it baselines."""
     import logging
 
     from alembic.migration import MigrationContext
@@ -109,6 +110,7 @@ def test_migration_0010_dedupes_kpi_names_then_adds_unique_index(db_session, cap
     from sqlalchemy import text
     from sqlalchemy.exc import IntegrityError
 
+    from app.core.canonical import dims_to_json, key_hash_for
     from app.models import DataPoint, Indicator, PendingChange, Run, WatchTarget
 
     mod = _load_migration("0010_unique_kpi_names.py", "m0010")
@@ -127,11 +129,14 @@ def test_migration_0010_dedupes_kpi_names_then_adds_unique_index(db_session, cap
     db_session.flush()
     for code in ("Price", "PRICE", "Other"):
         db_session.add(Indicator(source_id=a.id, code=code, name=code))
-        db_session.add(DataPoint(source_id=a.id, key_hash=code.ljust(40, "x")[:40], dataset="page",
-                                 indicator=code, country="", period="", dims={}, value_text="h",
-                                 value_hash="h" * 40))
+        for ds, dims in (("page", {}), ("api", {"path": "x.y"})):
+            db_session.add(DataPoint(
+                source_id=a.id, key_hash=key_hash_for(ds, code, "", "", dims_to_json(dims)),
+                dataset=ds, indicator=code, country="", period="", dims=dims, value_text="h",
+                value_hash="h" * 40))
     held = Run(source_id=a.id, status="suspect_pending")
-    db_session.add(held)
+    queued = Run(source_id=a.id, status="approve_queued")
+    db_session.add_all([held, queued])
     db_session.flush()
     db_session.add(PendingChange(run_id=held.id, source_id=a.id, key_hash="k" * 40,
                                  change_type="altered", dataset="page", indicator="Price",
@@ -142,15 +147,25 @@ def test_migration_0010_dedupes_kpi_names_then_adds_unique_index(db_session, cap
         mod.upgrade()
     db_session.expire_all()
     names = [(x.kpi_name, x.needs_baseline) for x in (db_session.get(WatchTarget, y.id) for y in t)]
-    assert names == [("Price", True), ("PRICE (3)", True), ("price (2)", False),
+    assert names == [("Price", True), ("PRICE (3)", False), ("price (2)", False),
                      ("Price (4)", True), ("Other", False), ("Price", False)]
     assert "PRICE (3)" in caplog.text and "Price (4)" in caplog.text
-    # the renamed KPIs' old rows are gone ("Price" was shared, so it goes too); "Other" stays
-    left = db_session.scalars(select(DataPoint.indicator).where(DataPoint.source_id == a.id)).all()
-    assert left == ["Other"]
-    assert db_session.scalars(select(Indicator.code).where(Indicator.source_id == a.id)).all() == ["Other"]
+    # "PRICE" had one owner: its rows follow it, with the key recomputed as a rename does.
+    # "Price" was shared by two KPIs: its rows are dropped. "Other" stays.
+    left = db_session.execute(select(DataPoint.indicator, DataPoint.dataset, DataPoint.key_hash,
+                                     DataPoint.dims).where(DataPoint.source_id == a.id)).all()
+    assert sorted((i, ds) for i, ds, _, _ in left) == [
+        ("Other", "api"), ("Other", "page"), ("PRICE (3)", "api"), ("PRICE (3)", "page")]
+    for i, ds, kh, dims in left:
+        assert kh == key_hash_for(ds, i, "", "", dims_to_json(dims))
+    assert sorted(db_session.scalars(select(Indicator.code).where(Indicator.source_id == a.id))) \
+        == ["Other", "PRICE (3)"]
+    # held runs are superseded with the same wording as _supersede_held
     db_session.refresh(held)
-    assert held.status == "superseded"
+    db_session.refresh(queued)
+    assert held.status == queued.status == "superseded"
+    assert held.error == "superseded by a change to the source's KPIs"
+    assert queued.error == "superseded by a change to the source's KPIs before the approval was applied"
     assert db_session.scalar(select(func.count()).select_from(PendingChange)
                              .where(PendingChange.run_id == held.id)) == 0
     # the index now refuses a case-insensitive duplicate
