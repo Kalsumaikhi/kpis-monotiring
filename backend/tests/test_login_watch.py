@@ -402,10 +402,14 @@ def test_login_needed_alert_once(wenv, db_session, monkeypatch):
     rec = Rec()
     r1 = run(sf, rec)
     r2 = run(sf, rec)
-    assert r1.status == r2.status == "failed"  # every KPI needed the login
-    assert sum(m.count("needs you to sign in") for m in rec.messages) == 1
-    assert rec.messages[0].endswith(ALERT)
-    assert "check failed" in rec.messages[0]
+    # Every KPI needed the login: incomplete, not failed (R10): no "check failed", no
+    # failure streak, no "incomplete fetch" line; just the one sign-in message.
+    assert (r1.status, r2.status) == ("baseline", "no_change")
+    assert r1.error.startswith("incomplete: 3 KPI(s) not checked: A (login_needed")
+    assert rec.messages == [ALERT]
+    for _ in range(3):  # many more scheduled runs: still nothing (no streak alert)
+        assert run(sf, rec).status == "no_change"
+    assert rec.messages == [ALERT]
     assert site.sign_ins == 1  # tried once; never again after a code was asked for
     db_session.expire_all()
     assert all(t.last_status == "login_needed" for t in db_session.scalars(select(WatchTarget)))
@@ -462,7 +466,7 @@ def test_no_auto_sign_in_after_code_or_failure(wenv, db_session, monkeypatch):
     rec = Rec()
     for _ in range(2):
         r = run(sf, rec)
-        assert r.status == "failed"
+        assert r.status in ("baseline", "no_change") and r.error.startswith("incomplete:")
     assert site.sign_ins == 0
     assert len(site.fetches) == 2  # one expired fetch per run, then nothing more
     after = session_row(db_session, c.id)
@@ -543,7 +547,7 @@ def test_sign_in_lock_busy_skips_without_touching_session(wenv, db_session, monk
         other.execute(text("SELECT pg_advisory_unlock(:ns, :cid)"), params)
         other.close()
     assert site.sign_ins == 0 and len(site.fetches) == 1
-    assert r.status == "failed" and "login_needed: login needed" in r.error
+    assert r.status in ("baseline", "no_change") and "login_needed: login needed" in r.error
     after = session_row(db_session, c.id)
     assert (after.status, bytes(after.state_enc), after.updated_at) == before
 
@@ -621,7 +625,7 @@ def test_interactive_sign_in_skips_targets_untouched(wenv, db_session, monkeypat
     rec = Rec()
     r = run(sf, rec)
     assert site.fetches == [] and site.sign_ins == 0
-    assert r.status == "failed" and "login_needed: login needed" in r.error
+    assert r.status in ("baseline", "no_change") and "login_needed: login needed" in r.error
     after = session_row(db_session, c.id)
     assert (after.status, bytes(after.state_enc), after.updated_at, after.notified_at) == before
     assert not any("needs you to sign in" in m for m in rec.messages)
@@ -760,7 +764,7 @@ def test_e2e_relogin_then_login_page_never_becomes_content(wenv, db_session, sit
     site.expire_all()
     site.code_mode = True
     r = run(sf, rec)
-    assert r.status == "failed" and "login_needed: login needed" in r.error
+    assert r.status in ("baseline", "no_change") and "login_needed: login needed" in r.error
     raw = Path(r.raw_path).read_text(encoding="utf-8")
     assert "password" not in raw.lower() and PASSWORD not in raw
     assert all(t["status"] == "login_needed" and "text" not in t
@@ -797,3 +801,67 @@ def test_e2e_json_behind_login(wenv, db_session, site):
     site.expire_all()
     assert run(sf).status == "no_change"
     assert session_row(db_session, c.id).status == "ok"
+
+
+@respx.mock
+def test_first_run_all_login_needed_then_success_is_silent_baseline(wenv, db_session, monkeypatch):
+    """R10: the first-ever run finds every KPI waiting for a sign-in (an empty, incomplete
+    run); once signed in, the next run baselines those KPIs silently: no change alert."""
+    src, sf = wenv
+    site = FakeSite(monkeypatch, valid=())
+    site.code_mode = True
+    c = mk_login(db_session)
+    add_target(db_session, src, c, "https://portal.example/a", "A")
+    add_target(db_session, src, c, "https://portal.example/b", "B")
+    robots()
+    rec = Rec()
+    r1 = run(sf, rec)
+    assert r1.status != "failed" and r1.error.startswith("incomplete:")
+    assert rec.messages == [ALERT]
+    with sf() as s:  # the user signs in from the dashboard
+        s.execute(update(LoginSession).where(LoginSession.credential_id == c.id).values(
+            status="ok", last_error=None,
+            state_enc=creds.encrypt(json.dumps(sid_state("fresh")))))
+        s.commit()
+    site.valid.add("fresh")
+    r2 = run(sf, rec)
+    assert r2.status in ("baseline", "no_change"), (r2.status, r2.error)
+    assert r2.error is None and r2.added == 0
+    assert rec.messages == [ALERT]  # nothing new: a silent baseline
+    db_session.expire_all()
+    assert db_session.scalar(select(func.count()).select_from(DataPoint)) == 2
+    assert all(not t.needs_baseline and t.last_status == "ok"
+               for t in db_session.scalars(select(WatchTarget)))
+    site.content["https://portal.example/a"] = "v2"
+    assert run(sf, rec).status == "ok"  # a real change after the baseline does alert
+    assert len(rec.messages) == 2 and "KPI page(s) updated" in rec.messages[1]
+
+
+@respx.mock
+def test_partial_login_needed_has_no_incomplete_line(wenv, db_session, monkeypatch):
+    """Some KPIs ok, the rest waiting for a sign-in: the message is only the login line."""
+    src, sf = wenv
+    site = FakeSite(monkeypatch, valid=())
+    site.code_mode = True
+    c = mk_login(db_session)
+    add_target(db_session, src, c, "https://portal.example/a", "A")
+    add_target(db_session, src, None, "https://open.example/x", "Open", use_browser=False)
+    robots()
+    respx.get("https://open.example/x").mock(return_value=httpx.Response(
+        200, text="<main>open</main>", headers={"content-type": "text/html"}))
+    rec = Rec()
+    run(sf, rec)  # baseline
+    r = run(sf, rec)
+    assert r.error.startswith("incomplete:")
+    assert not any("incomplete fetch" in m for m in rec.messages)
+    assert sum(m.count("needs you to sign in") for m in rec.messages) == 1
+
+
+def test_all_failed_mixed_with_other_errors_still_fails(tmp_path):
+    from app.connectors.watch.connector import WatchConnector
+    raw = tmp_path / "r.json"
+    raw.write_text(json.dumps({"targets": [
+        {"id": 1, "kpi_name": "A", "status": "login_needed", "error": "login needed"},
+        {"id": 2, "kpi_name": "B", "status": "error", "error": "HTTP 500"}]}))
+    with pytest.raises(RuntimeError, match="all targets failed"):
+        WatchConnector.parse(object.__new__(WatchConnector), raw)

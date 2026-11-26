@@ -126,6 +126,22 @@ def _api_text(data: Any) -> str:
     return "\n".join(f"{k}: {v}" for k, v in sorted(flatten_json(data).items()))
 
 
+def _only_login_needed(targets: list[dict]) -> bool:
+    """True when some KPIs were not checked and every one of them waits for a sign-in."""
+    unchecked = [t for t in targets if t["status"] != "ok"]
+    return bool(unchecked) and all(t["status"] == "login_needed" for t in unchecked)
+
+
+def _run_only_login_needed(run) -> bool:
+    try:
+        if not run.raw_path or not Path(run.raw_path).exists():
+            return False
+        return _only_login_needed(
+            json.loads(Path(run.raw_path).read_text(encoding="utf-8"))["targets"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+
+
 class WatchConnector:
     area = "custom"
     access = "watch"
@@ -214,7 +230,10 @@ class WatchConnector:
         claimed the alert for). Handed out once."""
         alerts, self._alerts = self._alerts, []
         self._handed = alerts
-        return {"login_needed": alerts} if alerts else {}
+        out: dict = {"login_needed": alerts} if alerts else {}
+        if _run_only_login_needed(run):
+            out["incomplete_note"] = None  # the login line says it; no "incomplete fetch" too
+        return out
 
     def notify_failed(self, session, run) -> None:
         """The run's message was not delivered: un-claim its login-needed alerts, so the next
@@ -439,8 +458,11 @@ class WatchConnector:
                 rows.append(RawRow("page", name, "", "", t["sha256"]))
         # Per-target errors in the raw file are already scrubbed of any key.
         shown = ", ".join(warnings[:5]) + (", …" if len(warnings) > 5 else "")
-        if targets and failed == len(targets):
+        waiting = _only_login_needed(targets)
+        if targets and failed == len(targets) and not waiting:
             raise RuntimeError(f"all targets failed: {shown}")
+        # Every KPI waiting for a sign-in is an incomplete run, not a failed one (R10): no
+        # "check failed" or failure streak; the login's own message says what to do.
         if warnings:  # one summary line, so the pipeline's "incomplete:" handling sees it
             warnings = [f"incomplete: {len(warnings)} KPI(s) not checked: {shown}"]
         return ParseResult(
