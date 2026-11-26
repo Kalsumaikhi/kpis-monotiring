@@ -41,6 +41,12 @@ class Connector(Protocol):
     # adds it, via an httpx request hook on the client passed to download(), to https requests
     # (including redirect hops) whose host is listed; other hosts and http never get it.
     # Absent or empty means the source does not support keys and a stored key is ignored.
+    # A connector that declares credential_hosts must never log, raise, or write into its raw
+    # file the raw text of an httpx exception, an httpx.Request/Response repr, or a request
+    # URL (str(request.url), response.url): once the hook has run they carry the key (a
+    # query key in the URL, a header key in the request). Log or raise with
+    # type(e).__name__ and a status code instead. The pipeline scrubs run.error and the raw
+    # file as a backstop, but logs and anything else the connector emits are not scrubbed.
 
     def download(self, client: httpx.Client, dest: Path) -> None:
         """Write exactly one raw file at `dest`."""
