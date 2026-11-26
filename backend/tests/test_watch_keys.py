@@ -8,7 +8,6 @@ import httpx
 import pytest
 import respx
 from cryptography.fernet import Fernet
-from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from app import credentials as creds
@@ -19,6 +18,7 @@ from app.connectors.watch import fetch as fetch_mod
 from app.connectors.watch.fetch import fetch_target
 from app.core import pipeline
 from app.models import Credential, Run, Source, WatchSnapshot, WatchTarget
+from tests.conftest import api_client
 
 AUTH = ("anyone", "secret")
 SECRET = "sk-super-secret+/123"
@@ -44,7 +44,7 @@ def client(db_session, session_factory, monkeypatch):
     app = create_app()
     app.dependency_overrides[deps.get_session] = lambda: db_session
     app.dependency_overrides[deps.get_session_factory] = lambda: session_factory
-    c = TestClient(app)
+    c = api_client(app)
     c.auth = AUTH
     return c
 
@@ -545,3 +545,70 @@ def test_key_changed_during_run_keeps_needs_baseline(wenv, db_session, tmp_path)
     WatchConnector(src.id, "custom-x", "X", sf).after_run(db_session, run)
     db_session.expire_all()
     assert db_session.get(WatchTarget, t.id).needs_baseline is True
+
+
+# --- key change while a run is in progress or held (plan 3a task 4) -----------------
+
+def test_watch_key_change_during_run_409(wenv, db_session, client, held_lock):
+    src, sf = wenv
+    c = mk_cred(db_session)
+    t = add_target(db_session, src, None)
+    t.needs_baseline = False
+    db_session.commit()  # a 409 rolls the request's session back
+    held_lock(src.id)  # a run is fetching with the old key
+    r = client.patch(f"/api/watch-targets/{t.id}", json={"credential_id": c.id})
+    assert r.status_code == 409 and r.json()["detail"] == "source is running, try again"
+    db_session.expire_all()
+    tt = db_session.get(WatchTarget, t.id)
+    assert tt.credential_id is None and tt.needs_baseline is False
+
+
+@respx.mock
+def test_watch_key_change_supersedes_held_run(wenv, db_session, client):
+    from app.models import PendingChange
+    src, sf = wenv
+    c = mk_cred(db_session)
+    t = add_target(db_session, src, None)
+    robots()
+    route = respx.get("https://h.example/p").mock(return_value=httpx.Response(
+        200, text="<main>teaser</main>", headers={"content-type": "text/html"}))
+    assert pipeline.run_source(sf, "custom-x").status == "baseline"
+    route.mock(return_value=httpx.Response(
+        200, text="<main>teaser 2</main>", headers={"content-type": "text/html"}))
+    held = pipeline.run_source(sf, "custom-x", force_hold=True)
+    assert held.status == "suspect_pending"
+    assert client.patch(f"/api/watch-targets/{t.id}", json={"credential_id": c.id}).status_code == 200
+    db_session.expire_all()
+    run = db_session.get(Run, held.id)
+    assert run.status == "superseded"
+    assert db_session.scalars(select(PendingChange).where(PendingChange.run_id == held.id)).all() == []
+    assert client.post(f"/api/runs/{held.id}/approve").status_code == 409
+    assert db_session.get(WatchTarget, t.id).needs_baseline is True
+
+
+def test_key_edit_while_watch_source_runs_409(wenv, db_session, client, held_lock):
+    src, sf = wenv
+    c = mk_cred(db_session)
+    t = add_target(db_session, src, c)
+    other = add_target(db_session, src, None, url="https://h.example/o", name="Other")
+    t.needs_baseline = other.needs_baseline = False
+    db_session.commit()
+    held_lock(src.id)
+    r = client.patch(f"/api/credentials/{c.id}", json={"secret": "sk-new-secret-1"})
+    assert r.status_code == 409
+    db_session.expire_all()
+    assert db_session.get(WatchTarget, t.id).needs_baseline is False
+
+
+def test_key_secret_replace_sets_target_baseline(wenv, db_session, client):
+    src, sf = wenv
+    c = mk_cred(db_session)
+    t = add_target(db_session, src, c)
+    other = add_target(db_session, src, None, url="https://h.example/o", name="Other")
+    t.needs_baseline = other.needs_baseline = False
+    db_session.commit()
+    assert client.patch(f"/api/credentials/{c.id}", json={"secret": "sk-new-secret-1"}).status_code == 200
+    db_session.expire_all()
+    assert db_session.get(WatchTarget, t.id).needs_baseline is True
+    assert db_session.get(WatchTarget, other.id).needs_baseline is False
+    assert db_session.get(Source, src.id).needs_baseline is False  # watch: per target

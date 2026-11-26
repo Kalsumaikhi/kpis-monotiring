@@ -9,6 +9,7 @@ from __future__ import annotations
 import httpx
 
 from app.config import get_settings
+from app.core.pipeline import SKIPPED_DELETIONS
 from app.models import Run, Source
 
 _TIMEOUT_SECONDS = 10
@@ -53,6 +54,9 @@ def format_run_message(
     if note and run.status in ("ok", "no_change", "baseline"):
         blocks.append(f":warning: **{source.name}** — incomplete fetch: "
                       f"{_no_mentions(note[:_MAX_ERROR_CHARS])}")
+    skipped = _skipped_deletions(run)
+    if skipped:
+        blocks.append(f":warning: **{source.name}** — {_no_mentions(skipped[:_MAX_ERROR_CHARS])}")
     # Logins that moved into login_needed during this run: whatever the run's status.
     base = get_settings().dashboard_base_url if dashboard_base_url is None else dashboard_base_url
     seen: set[str] = set()
@@ -62,6 +66,16 @@ def format_run_message(
         seen.add(item["login_name"])
         blocks.append(_login_needed_block(item["source"], item["login_name"], base))
     return "\n\n".join(blocks) if blocks else None
+
+
+def _skipped_deletions(run) -> str | None:
+    """The key baseline's "skipped deletions" warning, if this baseline run has one."""
+    if run.status != "baseline":
+        return None
+    for part in (run.error or "").split("; "):
+        if part.startswith(SKIPPED_DELETIONS):
+            return part
+    return None
 
 
 def _login_needed_block(source_name: str, login_name: str, base_url: str) -> str:

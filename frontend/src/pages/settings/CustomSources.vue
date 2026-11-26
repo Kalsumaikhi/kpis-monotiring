@@ -18,6 +18,9 @@ const formWrap = ref<HTMLElement | null>(null)
 const importOpen = ref(false)
 const toDelete = ref<WatchTarget | null>(null)
 const busyId = ref<number | null>(null)
+const sourceToDelete = ref<CustomSource | null>(null)
+const sourceBusy = ref<string | null>(null)
+const sourceErrors = ref<Record<string, string>>({})
 const note = ref('')
 const formComp = ref<{ dirty: boolean } | null>(null)
 type FormReq = { target: WatchTarget | null; sourceName: string; advanced: boolean }
@@ -101,6 +104,27 @@ async function doDelete() {
   }
 }
 
+async function doDeleteSource() {
+  const s = sourceToDelete.value
+  sourceToDelete.value = null
+  if (!s) return
+  sourceBusy.value = s.slug
+  delete sourceErrors.value[s.slug]
+  try {
+    await apiSend('DELETE', `/api/custom-sources/${encodeURIComponent(s.slug)}`)
+    show(`${s.name} deleted`)
+    await load()
+    sourceBusy.value = null
+    await nextTick()
+    addBtn.value?.focus() // the section the focus was in is gone
+  } catch (e) {
+    sourceErrors.value[s.slug] = e instanceof ApiError ? e.detail : 'Could not delete the source'
+    sourceBusy.value = null
+    await nextTick() // the button is enabled again, so it can take focus back
+    document.querySelector<HTMLElement>(`[data-test=delete-source-${s.slug}]`)?.focus()
+  }
+}
+
 async function onImported() {
   await load()
   note.value = "New KPIs are checked silently the first time — you'll be alerted from the second change on."
@@ -133,7 +157,11 @@ const shortUrl = (u: string) => u.replace(/^https?:\/\//i, '')
     <p v-else-if="!sources.length && !error" class="muted empty">No custom sources yet. Use “Add KPI” or “Import from Excel” to start watching a link.</p>
 
     <section v-for="s in sources" :key="s.slug" class="group" :aria-label="s.name">
-      <h3>{{ s.name }} <span class="muted count">{{ s.targets.length }} {{ s.targets.length === 1 ? 'KPI' : 'KPIs' }}</span></h3>
+      <div class="ghead">
+        <h3>{{ s.name }} <span class="muted count">{{ s.targets.length }} {{ s.targets.length === 1 ? 'KPI' : 'KPIs' }}</span></h3>
+        <button type="button" class="btn danger" :data-test="`delete-source-${s.slug}`" :disabled="sourceBusy === s.slug" @click="sourceToDelete = s">Delete source</button>
+      </div>
+      <p v-if="sourceErrors[s.slug]" class="error-text" role="alert" :data-test="`source-error-${s.slug}`">{{ sourceErrors[s.slug] }}</p>
       <div class="table-wrap">
         <table>
           <thead>
@@ -170,6 +198,11 @@ const shortUrl = (u: string) => u.replace(/^https?:\/\//i, '')
       confirm-label="Delete" danger @confirm="doDelete" @cancel="toDelete = null"
     />
     <ConfirmDialog
+      :open="!!sourceToDelete" title="Delete this source?"
+      :message="`Delete ${sourceToDelete?.name ?? ''}? Its KPIs, history and change records are removed. Keys and logins are kept.`"
+      confirm-label="Delete source" danger @confirm="doDeleteSource" @cancel="sourceToDelete = null"
+    />
+    <ConfirmDialog
       :open="!!pendingForm" title="Discard unsaved changes?" message="The form you have open has changes that are not saved."
       confirm-label="Discard changes" danger @confirm="discardAndOpen" @cancel="pendingForm = null"
     />
@@ -182,6 +215,8 @@ const shortUrl = (u: string) => u.replace(/^https?:\/\//i, '')
 .head { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 12px; align-items: flex-start; }
 .note { border-left: 4px solid var(--link); background: var(--surface-2); padding: 8px 12px; border-radius: var(--radius); }
 .group { display: flex; flex-direction: column; gap: 8px; }
+.ghead { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 8px; }
+.ghead .btn { min-height: 32px; padding: 0 10px; }
 .count { font-weight: 400; font-size: 0.8125rem; }
 .table-wrap { position: relative; overflow-x: auto; max-width: 100%; border: 1px solid var(--border); border-radius: var(--radius); }
 table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }

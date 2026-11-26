@@ -131,7 +131,7 @@ const server = https.createServer({ cert: certPem, key: fs.readFileSync(path.joi
 const api = async (p, init = {}) => {
   const r = await fetch(BASE + p, {
     ...init,
-    headers: { authorization: AUTH, ...(init.body ? { 'content-type': 'application/json' } : {}), ...(init.headers || {}) },
+    headers: { authorization: AUTH, 'x-requested-with': 'kpi-monitor', ...(init.body ? { 'content-type': 'application/json' } : {}), ...(init.headers || {}) },
   })
   if (!r.ok) throw new Error(`${p} -> ${r.status} ${await r.text()}`)
   return r.status === 204 ? null : r.json()

@@ -158,3 +158,19 @@ def test_http_500_raises():
     with pytest.raises(httpx.HTTPStatusError):
         notifier.notify_run(make_run(status="baseline", rows_total=1),
                             make_source(), [], 0)
+
+
+def test_key_baseline_skipped_deletions_warns():
+    run = make_run(status="baseline", rows_total=1, error=(
+        "key baseline skipped deletions: 9 rows missing (over the safety limit)"))
+    assert fmt(run) == (
+        "**World Bank WDI** — baseline loaded: 1 rows\n\n"
+        ":warning: **World Bank WDI** — key baseline skipped deletions: 9 rows missing "
+        "(over the safety limit)")
+    run = make_run(status="baseline", rows_total=1, error="incomplete: x; key baseline "
+                   "skipped deletions: 2 rows missing (over the safety limit)")
+    assert fmt(run).endswith(
+        ":warning: **World Bank WDI** — key baseline skipped deletions: 2 rows missing "
+        "(over the safety limit)")
+    assert fmt(make_run(status="baseline", rows_total=1, error="incomplete: x")) == (
+        "**World Bank WDI** — baseline loaded: 1 rows")

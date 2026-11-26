@@ -32,6 +32,7 @@ from app.connectors.watch import fetch as fetch_mod
 from app.connectors.watch.fetch import FetchResult
 from app.core import pipeline
 from app.models import Credential, LoginAttempt, LoginSession, Run, Source, WatchTarget
+from tests.conftest import api_client
 
 AUTH = ("anyone", "secret")
 USER = "me@example.com"
@@ -66,7 +67,7 @@ def make_client(get_session, factory, monkeypatch) -> TestClient:
     app = create_app()
     app.dependency_overrides[deps.get_session] = get_session
     app.dependency_overrides[deps.get_session_factory] = lambda: factory
-    c = TestClient(app)
+    c = api_client(app)
     c.auth = AUTH
     return c
 
@@ -821,3 +822,24 @@ def test_get_attempt_past_window_with_stored_code_still_waiting(client, db_sessi
     db_session.commit()
     r = client.get(f"/api/logins/{c.id}/attempt").json()
     assert r["status"] == "waiting_code" and r["error"] is None and r["remaining_seconds"] == 0
+
+
+def test_sweep_prunes_finished_attempts_older_than_30_days(db_session, session_factory):
+    now = datetime.now(timezone.utc)
+    c = mk_login(db_session, name="Prune")
+    old, recent = now - timedelta(days=31), now - timedelta(days=29)
+    rows = [
+        LoginAttempt(credential_id=c.id, status="succeeded", created_at=old, finished_at=old),
+        LoginAttempt(credential_id=c.id, status="failed", created_at=old, finished_at=old),
+        LoginAttempt(credential_id=c.id, status="cancelled", created_at=old, finished_at=recent),
+        LoginAttempt(credential_id=c.id, status="expired", created_at=recent, finished_at=recent),
+        LoginAttempt(credential_id=c.id, status="failed", created_at=old),  # no finished_at
+    ]
+    db_session.add_all(rows)
+    db_session.commit()
+    ids = [r.id for r in rows]
+    db_session.rollback()
+    la.sweep_stale_attempts(session_factory)
+    db_session.expire_all()
+    left = set(db_session.scalars(select(LoginAttempt.id).where(LoginAttempt.id.in_(ids))))
+    assert left == {ids[2], ids[3]}

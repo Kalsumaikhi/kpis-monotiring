@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import re
+from contextlib import ExitStack
+from types import SimpleNamespace
 from typing import Any, Literal
 from urllib.parse import urlsplit
 
@@ -15,7 +17,9 @@ from sqlalchemy.orm import Session
 
 from app import credentials as creds
 from app.api.deps import get_session
-from app.api.util import iso
+from app.api.util import iso, source_lock
+from app.core.pipeline import _supersede_held
+from app.api.routes_sources import KEY_CHANGE, _supports_keys
 from app.models import ACTIVE_ATTEMPT_STATUSES, Credential, LoginAttempt, LoginSession, Source, WatchTarget
 
 router = APIRouter()
@@ -286,6 +290,60 @@ def patch_credential(cid: int, body: CredentialPatch, session: Session = Depends
             ) from None
         if not HEADER_SAFE.match(stored):
             raise HTTPException(422, NOT_ASCII)
+    sends_change = _changes_what_is_sent(row, kind, fields, data)
+    affected = _affected_sources(session, cid) if sends_change else []
+    with ExitStack() as locks:
+        # Try-locks only, in id order; a busy one releases those already held (409).
+        for sid in affected:
+            locks.enter_context(source_lock(session, sid, BUSY_KEY))
+        if sends_change and not set(_affected_sources(session, cid)) <= set(affected):
+            # The key was given to another source meanwhile; its lock is not held.
+            session.rollback()
+            raise HTTPException(409, BUSY_KEY)
+        if row.kind == "login" and kind == "login":
+            # Under the locks: no run of these sources is using the KPIs being checked.
+            stranded = _stranded_kpis(session, row, fields)
+            if stranded:  # nothing was changed yet; leaving the block releases the locks
+                return _stranded_409(stranded)
+        _patch(session, row, cid, data, name, kind, fields, affected)
+    session.refresh(row)
+    return _json(row, _used_by(session, [cid]).get(cid), _fernet(),
+                 _login_info(session, [cid]).get(cid))
+
+
+BUSY_KEY = "a check is running for a source that uses this key; try again when it finishes"
+SENT_FIELDS = ("header_name", "prefix", "param_name", "username", "extra_hosts")
+
+
+def _host(url: str | None) -> str | None:
+    try:
+        return (urlsplit(url).hostname or "").lower() or None if url else None
+    except ValueError:
+        return None
+
+
+def _changes_what_is_sent(row: Credential, kind: str, fields: dict, data: dict) -> bool:
+    """Whether the edit changes what is sent with the key, so data fetched with it may differ."""
+    return ("secret" in data or kind != row.kind
+            or any(fields[k] != getattr(row, k) for k in SENT_FIELDS)
+            or _host(fields["login_url"]) != _host(row.login_url))
+
+
+def _affected_sources(session: Session, cid: int) -> list[int]:
+    """Sources whose fetched data depends on this key: those that send it as their own key
+    (when the connector sends keys) and custom sources with KPIs that use it."""
+    ids = {s.id for s in session.scalars(select(Source).where(Source.credential_id == cid))
+           if _supports_keys(session, s)}
+    ids |= set(session.scalars(
+        select(WatchTarget.source_id).where(WatchTarget.credential_id == cid).distinct()))
+    return sorted(ids)
+
+
+def _patch(session: Session, row: Credential, cid: int, data: dict, name: str, kind: str,
+           fields: dict, affected: list[int]) -> None:
+    """Apply the edit and commit. With `affected` (whose locks the caller holds) the next run
+    of each is a silent baseline for this key, and their held runs, diffed with the old
+    key, are dropped."""
     reset = kind == "login" and row.kind == "login" and (
         "secret" in data or fields["username"] != row.username
         or fields["login_url"] != row.login_url)
@@ -309,13 +367,41 @@ def patch_credential(cid: int, body: CredentialPatch, session: Session = Depends
             if ls is not None:
                 session.delete(ls)
                 _cancel_attempts(session, cid)
+        if affected:
+            session.execute(update(Source).where(Source.id.in_(affected),
+                                                 Source.credential_id == cid)
+                            .values(needs_baseline=True, needs_baseline_at=func.clock_timestamp()))
+            session.execute(update(WatchTarget).where(WatchTarget.credential_id == cid)
+                            .values(needs_baseline=True))
+            for sid in affected:
+                _supersede_held(session, sid, reason=KEY_CHANGE)
         session.commit()
     except IntegrityError:
         session.rollback()
         raise HTTPException(409, "a key with this name already exists") from None
-    session.refresh(row)
-    return _json(row, _used_by(session, [cid]).get(cid), _fernet(),
-                 _login_info(session, [cid]).get(cid))
+
+
+MAX_LISTED = 5
+STRANDED = "this change takes away a host that enabled KPIs use: "
+
+
+def _stranded_kpis(session: Session, row: Credential, fields: dict) -> list[str]:
+    """Names of enabled KPIs of the login `row` whose host it covers now but would not with
+    `fields` (a new login page host, or a host removed from "Also used on")."""
+    if (fields["login_url"], fields["extra_hosts"]) == (row.login_url, row.extra_hosts):
+        return []
+    new = SimpleNamespace(login_url=fields["login_url"], extra_hosts=fields["extra_hosts"])
+    return [name for name, url in session.execute(
+        select(WatchTarget.kpi_name, WatchTarget.url)
+        .where(WatchTarget.credential_id == row.id, WatchTarget.enabled.is_(True))
+        .order_by(WatchTarget.id))
+        if creds.login_host_error(row, url) is None and creds.login_host_error(new, url)]
+
+
+def _stranded_409(names: list[str]) -> JSONResponse:
+    shown, more = names[:MAX_LISTED], max(0, len(names) - MAX_LISTED)
+    detail = STRANDED + ", ".join(shown) + (f" +{more} more" if more else "")
+    return JSONResponse({"detail": detail, "kpis": shown, "more": more}, status_code=409)
 
 
 @router.delete("/credentials/{cid}", status_code=204)

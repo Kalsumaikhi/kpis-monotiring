@@ -5,8 +5,7 @@ import httpx
 import openpyxl
 import pytest
 import respx
-from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app import watch_import
 from app.api import deps
@@ -14,7 +13,8 @@ from app.api.main import create_app
 from app.config import get_settings
 from app.connectors.watch import fetch as fetch_mod
 from app.core import pipeline
-from app.models import Change, DataPoint, ImportPreview, Indicator, Run, Source, WatchTarget
+from app.models import Change, DataPoint, ImportPreview, Indicator, Run, Source, WatchSnapshot, WatchTarget
+from tests.conftest import api_client
 
 AUTH = ("anyone", "secret")
 
@@ -38,7 +38,7 @@ def client(db_session, session_factory, monkeypatch):
     app = create_app()
     app.dependency_overrides[deps.get_session] = lambda: db_session
     app.dependency_overrides[deps.get_session_factory] = lambda: session_factory
-    c = TestClient(app)
+    c = api_client(app)
     c.auth = AUTH
     return c
 
@@ -121,6 +121,113 @@ def test_delete_target_no_removed_changes(client, db_session, session_factory):
     assert pts == ["Two"]
     assert db_session.scalars(select(Change)).all() == []
     assert client.delete(f"/api/watch-targets/{tid}").status_code == 404
+
+
+def _seed_source_rows(db_session, slug):
+    """Rows in every table that points at the source, plus a raw file on disk."""
+    from pathlib import Path
+    from app.models import ChangeRollup, PendingChange, Upload, WatchSnapshot
+    src = db_session.scalar(select(Source).where(Source.slug == slug))
+    run = Run(source_id=src.id, status="ok")
+    db_session.add(run)
+    db_session.flush()
+    raw = Path(get_settings().raw_dir) / slug / f"{run.id}.json"
+    raw.parent.mkdir(parents=True, exist_ok=True)
+    raw.write_text("{}")
+    run.raw_path = str(raw)
+    tid = db_session.scalar(select(WatchTarget.id).where(WatchTarget.source_id == src.id))
+    db_session.add_all([
+        Change(run_id=run.id, source_id=src.id, key_hash="a" * 40, change_type="altered",
+               dataset="page", indicator="Price", country="", period="p"),
+        PendingChange(run_id=run.id, source_id=src.id, key_hash="b" * 40, change_type="added",
+                      dataset="page", indicator="Price", country="", period="p"),
+        DataPoint(source_id=src.id, key_hash="c" * 40, dataset="page", indicator="Price", value_hash="e" * 40,
+                  country="", period="p"),
+        Indicator(source_id=src.id, code="Price", name="Price"),
+        ChangeRollup(source_id=src.id, indicator="Price", day=datetime.now().date(), altered=1),
+        Upload(source_id=src.id, who="x", filename="f", run_id=run.id),
+        WatchSnapshot(target_id=tid, run_id=run.id, content="x", content_hash="d" * 64,
+                      changed=False),
+    ])
+    db_session.commit()
+    return src, raw
+
+
+def _counts(db_session, source_id):
+    from app.models import ChangeRollup, PendingChange, Upload, WatchSnapshot
+    out = {}
+    for m in (Run, Change, PendingChange, DataPoint, Indicator, ChangeRollup, Upload, WatchTarget):
+        out[m.__tablename__] = db_session.scalar(
+            select(func.count()).select_from(m).where(m.source_id == source_id))
+    return out
+
+
+def test_delete_custom_source_removes_everything(client, db_session):
+    create(client)
+    create(client, source="Other", url="https://h.example/o")
+    acme, raw = _seed_source_rows(db_session, "custom-acme")
+    other, other_raw = _seed_source_rows(db_session, "custom-other")
+    before_other = _counts(db_session, other.id)
+    assert all(before_other.values()) and raw.exists()
+    assert client.delete("/api/custom-sources/custom-acme").status_code == 204
+    assert db_session.scalar(select(Source).where(Source.slug == "custom-acme")) is None
+    assert not raw.exists()
+    assert all(v == 0 for v in _counts(db_session, acme.id).values())
+    assert db_session.scalar(select(func.count()).select_from(WatchSnapshot)) == 1
+    assert _counts(db_session, other.id) == before_other
+    assert other_raw.exists()
+    assert client.delete("/api/custom-sources/custom-acme").status_code == 404
+
+
+def test_delete_custom_source_never_removes_outside_raw_dir(db_session, session_factory):
+    from pathlib import Path
+    from app.api.routes_watch import delete_custom_source
+    outside = Path(get_settings().raw_dir).parent / "outside-keep"
+    outside.mkdir(exist_ok=True)
+    (outside / "f.txt").write_text("x")
+    for slug in ("../outside-keep", "x/../../outside-keep", ".."):
+        db_session.add(Source(slug=slug, name=slug, area="custom", access="watch"))
+        db_session.commit()
+        delete_custom_source(slug, db_session)
+        assert db_session.scalar(select(Source).where(Source.slug == slug)) is None
+        assert (outside / "f.txt").exists()
+
+
+def test_delete_custom_source_with_queued_run_is_safe_for_worker(client, db_session, session_factory):
+    from app.worker import poll_queued_once
+    create(client)
+    sid = db_session.scalar(select(Source.id).where(Source.slug == "custom-acme"))
+    db_session.add(Run(source_id=sid, status="queued", trigger="manual"))
+    db_session.commit()
+    assert client.delete("/api/custom-sources/custom-acme").status_code == 204
+    assert db_session.scalars(select(Run)).all() == []
+    assert poll_queued_once(session_factory, None) == 0
+
+
+def test_delete_custom_source_refuses_builtin(client, db_session):
+    db_session.add(Source(slug="wdi", name="WDI", area="economic", access="api"))
+    db_session.commit()
+    assert client.delete("/api/custom-sources/wdi").status_code == 404
+    assert client.delete("/api/custom-sources/nope").status_code == 404
+    assert db_session.scalar(select(Source).where(Source.slug == "wdi")) is not None
+
+
+def test_delete_custom_source_409_while_locked(client, db_session, held_lock):
+    create(client)
+    sid = db_session.scalar(select(Source.id).where(Source.slug == "custom-acme"))
+    held_lock(sid)
+    r = client.delete("/api/custom-sources/custom-acme")
+    assert r.status_code == 409
+    assert r.json()["detail"] == "a check is running for this source; try again when it finishes"
+    assert db_session.scalar(select(Source).where(Source.slug == "custom-acme")) is not None
+
+
+def test_delete_custom_source_silent(client, db_session):
+    create(client)
+    _seed_source_rows(db_session, "custom-acme")
+    with respx.mock(assert_all_called=False) as m:
+        assert client.delete("/api/custom-sources/custom-acme").status_code == 204
+        assert len(m.calls) == 0
 
 
 def test_delete_last_target_keeps_source(client, db_session):
@@ -216,7 +323,7 @@ def test_import_confirm_creates_and_token_single_use(client, db_session):
     tok = upload(client, "k.xlsx", data).json()["token"]
     r = client.post("/api/watch-targets/import/confirm", json={"token": tok})
     assert r.status_code == 200
-    assert r.json() == {"created_sources": 1, "created_targets": 3, "skipped": 2}
+    assert r.json() == {"created_sources": 1, "created_targets": 3, "skipped": 2, "skipped_rows": []}
     assert db_session.scalars(select(Source).where(Source.slug == "custom-fresh")).one()
     assert client.post("/api/watch-targets/import/confirm", json={"token": tok}).status_code == 410
     assert client.post("/api/watch-targets/import/confirm", json={"token": "nope"}).status_code == 410
@@ -472,3 +579,114 @@ def test_xlsx_hyperlink_cells_use_the_link_target():
         ("Plain", "https://h.example/plain"),
         ("Lower", "https://h.example/low"),
     ]
+
+
+# --- unique KPI names per source (plan 3a task 5, item 1) -------------------------
+
+NAME_TAKEN = "a KPI with this name already exists in this source"
+
+
+def test_duplicate_kpi_name_409_message(client):
+    a = create(client).json()["id"]
+    r = create(client, kpi="price", url="https://h.example/q")
+    assert r.status_code == 409 and r.json()["detail"] == NAME_TAKEN
+    create(client, kpi="B", url="https://h.example/b")
+    r = client.patch(f"/api/watch-targets/{a}", json={"kpi_name": "b"})
+    assert r.status_code == 409 and r.json()["detail"] == NAME_TAKEN
+
+
+def test_duplicate_kpi_name_race_hits_the_index_409(client, monkeypatch):
+    """The app-level check can lose a race; the unique index then answers 409, never 500."""
+    from app.api import routes_watch
+
+    a = create(client).json()["id"]
+    create(client, kpi="B", url="https://h.example/b")
+    monkeypatch.setattr(routes_watch, "_conflict", lambda *a, **k: None)
+    r = create(client, kpi="PRICE", url="https://h.example/q")
+    assert r.status_code == 409 and r.json()["detail"] == NAME_TAKEN
+    r = client.patch(f"/api/watch-targets/{a}", json={"kpi_name": "b"})
+    assert r.status_code == 409 and r.json()["detail"] == NAME_TAKEN
+    tok = upload(client, "k.xlsx", xlsx([("Acme", "Fresh", "https://h.example/f")])).json()["token"]
+    create(client, kpi="fresh", url="https://h.example/f2")  # created since the preview
+    r = client.post("/api/watch-targets/import/confirm", json={"token": tok})
+    assert r.status_code == 409 and r.json()["detail"] == NAME_TAKEN
+
+
+def test_import_preview_flags_duplicate_names_in_sheet(client):
+    data = xlsx([("Acme", "Price", "https://h.example/a"), ("Acme", "PRICE", "https://h.example/b"),
+                 ("Other", "price", "https://h.example/c")])
+    st = [x["status"] for x in upload(client, "k.xlsx", data).json()["rows"]]
+    assert st == ["new_source", "duplicate", "new_source"]
+
+
+# --- target PATCH/DELETE under the source lock (plan 3a task 5, item 2) -----------
+
+@pytest.mark.parametrize("call", ["rename", "disable", "delete"])
+def test_target_deleted_while_waiting_for_lock_is_404(client, db_session, monkeypatch, call):
+    """The target is gone by the time the lock is taken: 404, not 500."""
+    from contextlib import contextmanager
+
+    from sqlalchemy import delete as sa_delete
+
+    from app.api import routes_watch
+
+    tid = create(client).json()["id"]
+    real = routes_watch._source_lock
+
+    @contextmanager
+    def lock_then_vanish(session, source_id, *a, **k):
+        with real(session, source_id, *a, **k):
+            session.execute(sa_delete(WatchTarget).where(WatchTarget.id == tid)
+                            .execution_options(synchronize_session=False))  # as another request would
+            yield
+
+    monkeypatch.setattr(routes_watch, "_source_lock", lock_then_vanish)
+    if call == "delete":
+        r = client.delete(f"/api/watch-targets/{tid}")
+    else:
+        body = {"kpi_name": "New"} if call == "rename" else {"enabled": False}
+        r = client.patch(f"/api/watch-targets/{tid}", json=body)
+    assert r.status_code == 404 and r.json()["detail"] == "target not found"
+
+
+def test_patch_recomputes_from_the_row_read_under_the_lock(client, db_session, monkeypatch):
+    """A rename that lands while a disable waits for the lock is kept, not reverted."""
+    from contextlib import contextmanager
+
+    from sqlalchemy import update as sa_update
+
+    from app.api import routes_watch
+
+    tid = create(client).json()["id"]
+    real = routes_watch._source_lock
+
+    @contextmanager
+    def lock_after_rename(session, source_id, *a, **k):
+        with real(session, source_id, *a, **k):
+            session.execute(sa_update(WatchTarget).where(WatchTarget.id == tid)
+                            .values(kpi_name="Renamed")
+                            .execution_options(synchronize_session=False))
+            yield
+
+    monkeypatch.setattr(routes_watch, "_source_lock", lock_after_rename)
+    r = client.patch(f"/api/watch-targets/{tid}", json={"enabled": False})
+    assert r.status_code == 200 and r.json()["kpi_name"] == "Renamed" and r.json()["enabled"] is False
+
+
+def test_import_confirm_says_why_a_row_was_skipped(client):
+    """Rows that became duplicates after the preview are skipped with a reason, per row."""
+    create(client)  # Acme / Price / https://h.example/p
+    data = xlsx([("Acme", "Fresh", "https://h.example/f"), ("Acme", "Linky", "https://h.example/l"),
+                 ("Acme", "Fine", "https://h.example/fine"), ("Acme", "Price", "https://h.example/z")])
+    tok = upload(client, "k.xlsx", data).json()["token"]
+    create(client, kpi="FRESH", url="https://h.example/f2")  # name taken since the preview
+    create(client, kpi="Other", url="https://h.example/l")  # link taken since the preview
+    r = client.post("/api/watch-targets/import/confirm", json={"token": tok})
+    assert r.status_code == 200
+    out = r.json()
+    assert (out["created_targets"], out["skipped"]) == (1, 3)
+    assert out["skipped_rows"] == [
+        {"row": 2, "source_name": "Acme", "kpi_name": "Fresh", "reason": NAME_TAKEN},
+        {"row": 3, "source_name": "Acme", "kpi_name": "Linky",
+         "reason": "a KPI with this link already exists"},
+    ]  # row 5 was already a duplicate in the preview, which said so

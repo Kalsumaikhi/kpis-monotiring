@@ -232,7 +232,9 @@ function teardown() {
   clearCode()
   document.removeEventListener('keydown', onKey, true)
   if (opener !== null || props.open) {
-    const target = opener && opener.isConnected ? opener : document.querySelector<HTMLElement>('main')
+    // document.body is no place to return to (nothing was focused): use the page's main.
+    const back = opener && opener.isConnected && opener !== document.body ? opener : null
+    const target = back ?? document.querySelector<HTMLElement>('main')
     target?.focus()
   }
   opener = null
@@ -262,9 +264,10 @@ watch(view, async (v) => {
 // A parent that removes the dialog with v-if never flips `open`, so restore focus here too.
 onBeforeUnmount(teardown)
 
-// A click outside must not throw away a code step the user is in the middle of.
+// A click outside must not throw away a code step the user is in the middle of (once it has
+// expired here there is nothing left to lose, so it closes).
 function onBackdrop() {
-  if (status.value === 'waiting_code') return
+  if (status.value === 'waiting_code' && !expiredLocally.value) return
   void cancel()
 }
 </script>
@@ -282,7 +285,7 @@ function onBackdrop() {
           <p v-else-if="view === 'starting' || view === 'signing'" class="line" data-test="signing"><span class="spinner" aria-hidden="true" />Signing in to {{ host }}…</p>
           <p v-else-if="view === 'verifying'" class="line" data-test="verifying"><span class="spinner" aria-hidden="true" />Checking the code…</p>
           <p v-else-if="view === 'succeeded'" class="line ok" data-test="succeeded"><span aria-hidden="true">✓</span> Signed in. Checking your KPIs now.</p>
-          <p v-else-if="view === 'problem'" class="error-text" role="alert" data-test="problem">{{ problemText }}</p>
+          <p v-else-if="view === 'problem'" class="error-text" data-test="problem">{{ problemText }}</p>
         </div>
 
         <form v-if="view === 'code' && !cancelling" class="code" novalidate autocomplete="off" @submit.prevent="submitCode">

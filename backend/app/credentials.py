@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import binascii
 import hashlib
+import html
 import json
 import re
 from dataclasses import dataclass, field
@@ -163,25 +164,47 @@ def _pattern(form: str) -> str:
     return "".join(out)
 
 
+def secret_forms(value: str) -> set[str]:
+    """Every spelling of `value` a page or log may carry: literal, URL-quoted (both ways),
+    inside a JSON string (with and without \\/ and non-ASCII escapes) and HTML-escaped."""
+    js = json.dumps(value)[1:-1]  # as it appears inside a JSON string
+    return {value, quote_plus(value), quote(value, safe=""), quote(value), js,
+            js.replace("/", "\\/"), json.dumps(value, ensure_ascii=False)[1:-1],
+            html.escape(value), html.escape(value, quote=False)}
+
+
 def _forms(cred: Credential) -> list[str]:
     """Every spelling of the secret (and for basic auth the Authorization token) to scrub,
     longest first."""
     values = [cred.secret] if cred.secret else []
     if cred.kind == "basic":
         values.append(_basic_token(cred))
-    forms = set()
+    forms: set[str] = set()
     for v in values:
-        js = json.dumps(v)[1:-1]  # as it appears inside a JSON string
-        forms |= {v, quote_plus(v), quote(v, safe=""), quote(v), js, js.replace("/", "\\/"),
-                  json.dumps(v, ensure_ascii=False)[1:-1]}
+        forms |= secret_forms(v)
     return sorted(forms, key=len, reverse=True)
 
 
-def _scrubber(cred: Credential, encoding: str | None = None):
-    forms = _forms(cred)
+def _compile(forms, encoding: str | None = None):
+    forms = sorted(set(forms), key=len, reverse=True)
     if encoding:  # match the UTF-8 bytes of a form as seen through a latin-1 decode
         forms = [f.encode().decode(encoding) for f in forms]
     return re.compile("|".join(_pattern(f) for f in forms)) if forms else None
+
+
+def _scrubber(cred: Credential, encoding: str | None = None):
+    return _compile(_forms(cred), encoding)
+
+
+def redact_values_bytes(data: bytes, values) -> bytes:
+    """Replace every spelling (secret_forms) of each of `values` in a body of unknown charset
+    with ***."""
+    forms: set[str] = set()
+    for v in values:
+        if v:
+            forms |= secret_forms(v)
+    rx = _compile(forms, "latin-1")
+    return rx.sub("***", data.decode("latin-1")).encode("latin-1") if (rx and data) else data
 
 
 def redact(text: str, cred: Credential | None) -> str:

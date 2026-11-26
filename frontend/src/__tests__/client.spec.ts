@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { ApiError, apiGet, apiSend, clearPassword, hasPassword, setPassword } from '../api/client'
+import { ApiError, apiGet, apiSend, apiUpload, clearPassword, hasPassword, setPassword } from '../api/client'
 import router from '../router'
 
 function mockFetch(status: number, body: unknown) {
@@ -52,5 +52,20 @@ describe('api client', () => {
     expect(err).toBeInstanceOf(ApiError)
     expect(err.status).toBe(0)
     expect(err.detail).toBe('Network error — check your connection')
+  })
+
+  it('sends X-Requested-With: kpi-monitor on every request, uploads included', async () => {
+    setPassword('p')
+    const fn = vi.fn().mockImplementation(async () => new Response('{}', { status: 200 }))
+    vi.stubGlobal('fetch', fn)
+    await apiGet('/api/sources')
+    await apiSend('POST', '/api/sources/x/run')
+    await apiSend('PATCH', '/api/sources/x', { enabled: false })
+    await apiSend('DELETE', '/api/watch-targets/1')
+    const fd = new FormData()
+    fd.append('source', 'x')
+    await apiUpload('/api/uploads', fd)
+    expect(fn).toHaveBeenCalledTimes(5)
+    for (const [, init] of fn.mock.calls) expect(init.headers['X-Requested-With']).toBe('kpi-monitor')
   })
 })

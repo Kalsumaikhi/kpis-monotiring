@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import re
 import shutil
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterable, Protocol
@@ -160,9 +161,18 @@ _NOT_FINISHED = ("queued", "running", "approve_queued", "superseded")
 _INCOMPLETE = "incomplete:"
 
 
+def _without_skip_marker(error: str | None) -> str:
+    """run.error without a leading key-baseline skip marker (it is put first; see run_source)."""
+    error = error or ""
+    if error.startswith(SKIPPED_DELETIONS):
+        _, _, error = error.partition("; ")
+    return error
+
+
 def _incomplete_note(session: Session, run: Run) -> str | None:
     """The run's warning when it became incomplete (the previous finished run was not)."""
-    if run.status not in ("ok", "no_change", "baseline") or not (run.error or "").startswith(_INCOMPLETE):
+    error = _without_skip_marker(run.error)
+    if run.status not in ("ok", "no_change", "baseline") or not error.startswith(_INCOMPLETE):
         return None
     prev_error = session.execute(
         select(Run.error)
@@ -170,9 +180,9 @@ def _incomplete_note(session: Session, run: Run) -> str | None:
         .order_by(Run.id.desc())
         .limit(1)
     ).first()
-    if prev_error is not None and (prev_error[0] or "").startswith(_INCOMPLETE):
+    if prev_error is not None and _without_skip_marker(prev_error[0]).startswith(_INCOMPLETE):
         return None
-    return run.error[len(_INCOMPLETE):].strip()
+    return error[len(_INCOMPLETE):].strip()
 
 
 def _notify_extras(session: Session, run: Run) -> dict:
@@ -401,6 +411,23 @@ def _scrub_raw(dest: Path, cred: creds.Credential) -> None:
                 log.error("could not delete unscrubbed raw file %s", path.name)
 
 
+SKIPPED_DELETIONS = "key baseline skipped deletions"  # also read by the notifier
+
+
+def _skipped_deletions_before(session: Session, source_id: int, run_id: int) -> bool:
+    """Whether the source's previous applied run was a key baseline that skipped deletions
+    under the current key: runs started before the flag was last set (an earlier key) don't
+    count. Failed and held runs don't count, so a failure in between doesn't restart it."""
+    q = (select(Run.error)
+         .where(Run.source_id == source_id, Run.id < run_id,
+                Run.status.in_(("ok", "no_change", "baseline"))))
+    since = session.scalar(select(Source.needs_baseline_at).where(Source.id == source_id))
+    if since is not None:
+        q = q.where(Run.started_at >= since)
+    error = session.scalar(q.order_by(Run.id.desc()).limit(1))
+    return (error or "").startswith(SKIPPED_DELETIONS)
+
+
 def run_source(
     session_factory: SessionFactory,
     slug: str,
@@ -427,17 +454,23 @@ def run_source(
             claimed = session.execute(
                 update(Run)
                 .where(Run.id == run_id, Run.source_id == source.id, Run.status == "queued")
-                .values(status="running", started_at=func.now())
+                .values(status="running", started_at=func.clock_timestamp())
             ).rowcount
             session.commit()
             if claimed == 0:
                 raise RunNotQueuedError(f"run {run_id} is not a queued run of {slug}")
             run = session.get(Run, run_id)
         else:
-            run = Run(source_id=source.id, status="running", trigger=trigger)
+            # The real start time (not the transaction's): compared with needs_baseline_at.
+            run = Run(source_id=source.id, status="running", trigger=trigger,
+                      started_at=func.clock_timestamp())
             session.add(run)
             session.commit()
         run_id = run.id
+        # Read under the lock: a key change takes it too, so this stays true for the whole
+        # run (see patch_source). Only a fetched run is the new key's baseline.
+        session.refresh(source)
+        key_baseline = source.needs_baseline and from_raw is None and not force_hold
 
         cred = None
         state = None
@@ -501,9 +534,29 @@ def run_source(
                 )
             )
             run = session.get(Run, run_id)
-            if not has_history:
-                apply_diff(session, source.id, run_id, parsed.complete, record_changes=False)
+            warnings = [creds.redact(w, cred) for w in parsed.warnings]
+            if not has_history or key_baseline:
                 status = "baseline"
+                if key_baseline and diff.existing > 0 \
+                        and diff.removed / diff.existing > settings.suspect_removal_ratio:
+                    # The new key returned far fewer rows (a wrong key, an outage): keep the
+                    # old rows (upsert only). The flag stays for one more silent try; after a
+                    # second short fetch it is cleared, so the next run's removal guard holds
+                    # the removals for review instead of the source staying silent forever.
+                    apply_diff(session, source.id, run_id, False, record_changes=False)
+                    # First, so the 2000-character cut of run.error can't drop it.
+                    warnings.insert(0, f"{SKIPPED_DELETIONS}: {diff.removed} rows "
+                                       "missing (over the safety limit)")
+                    if _skipped_deletions_before(session, source.id, run_id):
+                        session.get(Source, source.id).needs_baseline = False
+                    diff = replace(diff, removed=0)  # nothing was removed; the warning has N
+                else:
+                    apply_diff(session, source.id, run_id, parsed.complete, record_changes=False)
+                    if key_baseline:
+                        # Cleared by any non-failed key baseline, even an incomplete one (it
+                        # deleted nothing): a flag that waits for a complete run could keep
+                        # a source silent forever.
+                        session.get(Source, source.id).needs_baseline = False
             elif (
                 (diff.existing > 0 and diff.removed / diff.existing > settings.suspect_removal_ratio)
                 or (force_hold and diff.added + diff.altered + diff.removed > 0)
@@ -520,8 +573,7 @@ def run_source(
                 apply_diff(session, source.id, run_id, parsed.complete, record_changes=True,
                            exclude_indicators=excl)
                 status = "ok"
-            _finish(session, run, status, diff, parsed.indicators, parsed.vintage,
-                    [creds.redact(w, cred) for w in parsed.warnings])
+            _finish(session, run, status, diff, parsed.indicators, parsed.vintage, warnings)
         except Exception as e:  # noqa: BLE001
             run = _fail(session, run_id, e, cred)
             _on_failed(session, connector, run)

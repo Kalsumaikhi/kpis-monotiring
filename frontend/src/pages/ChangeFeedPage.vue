@@ -9,12 +9,16 @@ import StatusBadge from '../components/StatusBadge.vue'
 import { absoluteTime, fmtNum, relativeTime } from '../lib/format'
 
 const PAGE_SIZE = 50
+const AREA_LABELS: Record<string, string> = { custom: 'Custom sources' }
+const areaLabel = (a: string) => AREA_LABELS[a] ?? a.charAt(0).toUpperCase() + a.slice(1)
+const CHANGES = [['added', 'Added'], ['altered', 'Altered'], ['removed', 'Removed']] as const
 const STATUSES = ['ok', 'baseline', 'no_change', 'failed', 'suspect_pending', 'approve_queued', 'rejected', 'superseded', 'blocked', 'running', 'queued']
 
 const route = useRoute()
 const router = useRouter()
 
 const sources = ref<Source[]>([])
+const areas = computed(() => [...new Set(sources.value.map((s) => s.area).filter(Boolean))].sort())
 const rows = ref<Run[]>([])
 const total = ref(0)
 const loading = ref(true)
@@ -24,6 +28,8 @@ const str = (v: unknown) => (typeof v === 'string' ? v : '')
 const filters = computed(() => ({
   source: str(route.query.source),
   status: str(route.query.status),
+  area: str(route.query.area),
+  change: str(route.query.change),
   since: str(route.query.since),
   onlyChanges: str(route.query.changes) !== '0',
   page: Math.max(1, Number(str(route.query.page)) || 1),
@@ -44,7 +50,7 @@ function setQuery(patch: Record<string, string | undefined>) {
   for (const [k, v] of Object.entries({ ...route.query, ...patch })) {
     if (typeof v === 'string' && v !== '') q[k] = v
   }
-  router.replace({ query: q })
+  router.push({ query: q }) // a history entry per filter change, so Back undoes it
 }
 const setFilter = (patch: Record<string, string | undefined>) => setQuery({ ...patch, page: undefined })
 
@@ -58,6 +64,8 @@ async function load() {
     const res = await apiGet<Paged<Run>>('/api/runs', {
       source: f.source,
       status: f.status,
+      area: f.area,
+      change: f.change,
       since: f.since ? new Date(`${f.since}T00:00:00`).toISOString() : undefined,
       has_changes: f.onlyChanges ? true : undefined,
       page: f.page,
@@ -98,6 +106,20 @@ function open(r: Run) { router.push(`/runs/${r.id}`) }
         <select id="f-source" :value="filters.source" @change="setFilter({ source: ($event.target as HTMLSelectElement).value })">
           <option value="">All sources</option>
           <option v-for="s in sources" :key="s.slug" :value="s.slug">{{ s.name }}</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="f-area">Area</label>
+        <select id="f-area" :value="filters.area" @change="setFilter({ area: ($event.target as HTMLSelectElement).value })">
+          <option value="">All areas</option>
+          <option v-for="a in areas" :key="a" :value="a">{{ areaLabel(a) }}</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="f-change">Change type</label>
+        <select id="f-change" :value="filters.change" @change="setFilter({ change: ($event.target as HTMLSelectElement).value })">
+          <option value="">Any change</option>
+          <option v-for="[v, label] in CHANGES" :key="v" :value="v">{{ label }}</option>
         </select>
       </div>
       <div class="field">

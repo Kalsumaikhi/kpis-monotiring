@@ -2,7 +2,6 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
-from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 
 from app.api import deps
@@ -12,7 +11,7 @@ from app.connectors import registry
 from app.core import pipeline
 from app.core.canonical import RawRow
 from app.models import Change, DataPoint, Run, Source
-from tests.conftest import FakeConnector, row, seed
+from tests.conftest import FakeConnector, api_client, row, seed
 
 AUTH = ("anyone", "secret")
 
@@ -23,7 +22,7 @@ def client(db_session, session_factory, monkeypatch):
     app = create_app()
     app.dependency_overrides[deps.get_session] = lambda: db_session
     app.dependency_overrides[deps.get_session_factory] = lambda: session_factory
-    c = TestClient(app)
+    c = api_client(app)
     c.auth = AUTH
     return c
 
@@ -180,6 +179,64 @@ def test_runs_has_changes_filter(client, db_session, source):
     assert client.get("/api/runs?has_changes=false").json()["total"] == 3
 
 
+def _mixed_runs(db_session):
+    eco = Source(slug="eco", name="Eco", area="economic", access="api")
+    mil = Source(slug="mil", name="Mil", area="military", access="file")
+    db_session.add_all([eco, mil])
+    db_session.flush()
+    db_session.add_all([
+        Run(source_id=eco.id, status="ok", added=1),
+        Run(source_id=eco.id, status="ok", altered=2),
+        Run(source_id=mil.id, status="ok", removed=3),
+        Run(source_id=mil.id, status="ok", added=1, altered=1),
+    ])
+    db_session.commit()
+
+
+def test_runs_filter_area(client, db_session):
+    _mixed_runs(db_session)
+    r = client.get("/api/runs?area=military").json()
+    assert r["total"] == 2 and {i["source"] for i in r["items"]} == {"mil"}
+    assert client.get("/api/runs?area=economic").json()["total"] == 2
+    assert client.get("/api/runs?area=custom").status_code == 422  # no source has that area
+    assert client.get("/api/runs").json()["total"] == 4
+
+
+def test_runs_filter_change_type(client, db_session):
+    _mixed_runs(db_session)
+    added = client.get("/api/runs?change=added").json()
+    assert added["total"] == 2 and all(i["added"] > 0 for i in added["items"])
+    assert client.get("/api/runs?change=altered").json()["total"] == 2
+    removed = client.get("/api/runs?change=removed").json()
+    assert removed["total"] == 1 and removed["items"][0]["removed"] == 3
+    both = client.get("/api/runs?change=altered&area=military").json()
+    assert both["total"] == 1
+
+
+def test_runs_filter_area_is_dynamic(client, db_session):
+    _mixed_runs(db_session)
+    soc = Source(slug="soc", name="Soc", area="social", access="api")
+    db_session.add(soc)
+    db_session.flush()
+    db_session.add(Run(source_id=soc.id, status="ok", added=1))
+    db_session.commit()
+    r = client.get("/api/runs?area=social")
+    assert r.status_code == 200 and r.json()["total"] == 1
+    bad = client.get("/api/runs?area=xyz")
+    assert bad.status_code == 422 and "unknown area" in bad.json()["detail"]
+
+
+def test_runs_filter_unknown_area_422(client, db_session):
+    _mixed_runs(db_session)
+    assert client.get("/api/runs?area=xyz").status_code == 422
+    assert client.get("/api/runs?area=").status_code == 422
+
+
+def test_runs_filter_unknown_change_422(client, db_session):
+    _mixed_runs(db_session)
+    assert client.get("/api/runs?change=foo").status_code == 422
+
+
 def _run_with_changes(db_session, source):
     run = Run(source_id=source.id, status="ok")
     db_session.add(run)
@@ -293,3 +350,39 @@ def test_second_queued_insert_is_409(client, db_session, source, monkeypatch):
     db_session.commit()
     monkeypatch.setattr("app.api.routes_sources._has_open_run", lambda *a: False)
     assert client.post(f"/api/sources/{source.slug}/run").status_code == 409
+
+
+CSRF_REFUSED = [
+    ("POST", "/api/sources/x/run", {}),
+    ("POST", "/api/logins/1/sign-in", {}),
+    ("DELETE", "/api/watch-targets/1", {}),
+    ("PATCH", "/api/sources/x", {"json": {"enabled": False}}),
+    ("PUT", "/api/sources/x", {}),
+    ("POST", "/api/uploads", {"data": {"source": "x", "who": "w"},
+                              "files": {"file": ("f.json", b"[]")}}),
+]
+
+
+@pytest.mark.parametrize("method,path,kw", CSRF_REFUSED)
+def test_unsafe_method_without_header_403(client, method, path, kw):
+    """A cross-site form post (cached Basic auth, no custom header) is refused before routing."""
+    client.headers.pop("X-Requested-With", None)
+    r = client.request(method, path, **kw)
+    assert r.status_code == 403
+    assert r.json() == {"detail": "missing X-Requested-With"}
+    # a wrong value is refused too; without auth the CSRF check still comes first
+    r = client.request(method, path, headers={"X-Requested-With": "XMLHttpRequest"}, **kw)
+    assert r.status_code == 403
+    assert client.request(method, path, auth=None, **kw).status_code == 403
+
+
+def test_unsafe_method_with_header_reaches_the_route(client):
+    assert client.headers["X-Requested-With"] == "kpi-monitor"
+    assert client.post("/api/sources/nope/run").status_code == 404
+
+
+def test_get_without_header_ok(client):
+    client.headers.pop("X-Requested-With", None)
+    assert client.get("/api/sources").status_code == 200
+    assert client.head("/api/health").status_code in (200, 405)
+    assert client.get("/api/health").status_code == 200

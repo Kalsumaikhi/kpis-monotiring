@@ -127,6 +127,26 @@ describe('ImportDialog', () => {
     w.unmount()
   })
 
+  it('after import, lists rows skipped because something changed since the preview', async () => {
+    apiUpload.mockResolvedValue({ token: 'tok9', rows: [rows[0]] })
+    apiSend.mockResolvedValue({
+      created_sources: 0, created_targets: 0, skipped: 1,
+      skipped_rows: [{ row: 2, source_name: 'Acme', kpi_name: 'A', reason: 'a KPI with this name already exists in this source' }],
+    })
+    const w = mount(ImportDialog, { props: { open: true }, attachTo: document.body })
+    const input = document.body.querySelector('input[type=file]') as HTMLInputElement
+    Object.defineProperty(input, 'files', { value: [new File(['x'], 'k.csv')] })
+    input.dispatchEvent(new Event('change'))
+    await flushPromises()
+    ;(Array.from(document.body.querySelectorAll('button')).find((b) => /^Import 1 KPIs$/.test(b.textContent!.trim())) as HTMLElement).click()
+    await flushPromises()
+    const item = document.body.querySelector('[data-test=skipped-rows] li')
+    expect(item?.textContent).toContain('Row 2')
+    expect(item?.textContent).toContain('A')
+    expect(item?.textContent).toContain('a KPI with this name already exists in this source')
+    w.unmount()
+  })
+
   it('shows expired message on 410', async () => {
     apiUpload.mockResolvedValue({ token: 't', rows: [rows[0]] })
     apiSend.mockRejectedValue(new ApiError(410, 'import preview expired'))
@@ -175,6 +195,58 @@ describe('CustomSources', () => {
     confirm.click()
     await flushPromises()
     expect(apiSend).toHaveBeenCalledWith('DELETE', '/api/watch-targets/1')
+    w.unmount()
+  })
+
+  const dialogBtn = (label: string) =>
+    Array.from(document.body.querySelectorAll('.dialog button')).find((b) => b.textContent!.trim() === label) as HTMLElement
+
+  it('delete source asks confirmation naming what goes and what stays, then deletes', async () => {
+    apiGet.mockResolvedValue(custom())
+    apiSend.mockResolvedValue(null)
+    const w = mount(CustomSources, { attachTo: document.body })
+    await flushPromises()
+    await w.get('[data-test=delete-source-custom-acme]').trigger('click')
+    expect(document.body.textContent).toContain('Delete Acme? Its KPIs, history and change records are removed. Keys and logins are kept.')
+    expect(apiSend).not.toHaveBeenCalled()
+    dialogBtn('Delete source').click()
+    await flushPromises()
+    expect(apiSend).toHaveBeenCalledWith('DELETE', '/api/custom-sources/custom-acme')
+    expect(toasts.value.some((t) => t.message.includes('Acme deleted'))).toBe(true)
+    expect(apiGet).toHaveBeenCalledTimes(2)
+    w.unmount()
+  })
+
+  it('after a delete the section is gone and focus lands on Add KPI', async () => {
+    apiGet.mockResolvedValueOnce(custom()).mockResolvedValue([])
+    apiSend.mockResolvedValue(null)
+    const w = mount(CustomSources, { attachTo: document.body })
+    await flushPromises()
+    expect(w.find('section[aria-label=Acme]').exists()).toBe(true)
+    await w.get('[data-test=delete-source-custom-acme]').trigger('click')
+    dialogBtn('Delete source').click()
+    await flushPromises()
+    expect(w.find('section[aria-label=Acme]').exists()).toBe(false)
+    expect(document.activeElement).toBe(w.get('[data-test=add]').element)
+    w.unmount()
+  })
+
+  it('delete source cancel sends nothing; a 409 is shown inline', async () => {
+    apiGet.mockResolvedValue(custom())
+    const w = mount(CustomSources, { attachTo: document.body })
+    await flushPromises()
+    await w.get('[data-test=delete-source-custom-acme]').trigger('click')
+    dialogBtn('Cancel').click()
+    await flushPromises()
+    expect(apiSend).not.toHaveBeenCalled()
+    apiSend.mockRejectedValue(new ApiError(409, 'a check is running for this source; try again when it finishes'))
+    await w.get('[data-test=delete-source-custom-acme]').trigger('click')
+    dialogBtn('Delete source').click()
+    await flushPromises()
+    expect(w.get('[data-test=source-error-custom-acme]').text()).toContain('a check is running for this source')
+    expect(w.find('[data-test=delete-source-custom-acme]').exists()).toBe(true)
+    expect((w.get('[data-test=delete-source-custom-acme]').element as HTMLButtonElement).disabled).toBe(false)
+    expect(document.activeElement).toBe(w.get('[data-test=delete-source-custom-acme]').element)
     w.unmount()
   })
 

@@ -435,3 +435,45 @@ describe('Settings #logins', () => {
     window.history.replaceState(null, '', '/')
   })
 })
+
+describe('SignInDialog focus and announcements (plan 3a task 5)', () => {
+  it('does not restore focus to document.body; falls back to main', async () => {
+    const main = document.createElement('main')
+    main.tabIndex = -1
+    document.body.appendChild(main)
+    ;(document.activeElement as HTMLElement | null)?.blur()
+    expect(document.activeElement).toBe(document.body)
+    apiSend.mockResolvedValueOnce({ attempt_id: 5, status: 'pending' })
+    apiGet.mockResolvedValue(at('signing_in'))
+    const w = await openDialog()
+    await w.setProps({ open: false })
+    await flushPromises()
+    expect(document.activeElement).toBe(main)
+    w.unmount()
+  })
+
+  it('a backdrop click closes the locally expired view', async () => {
+    vi.useFakeTimers({ now: new Date('2026-11-26T10:00:00Z') })
+    apiSend.mockResolvedValueOnce({ attempt_id: 5, status: 'pending' })
+    const serverExp = Date.parse('2026-11-26T10:00:02Z')
+    apiGet.mockImplementation(async () => at('waiting_code', { expires_at: '2026-11-26T10:00:02Z', remaining_seconds: Math.max(0, Math.ceil((serverExp - Date.now()) / 1000)) }))
+    const w = await openDialog()
+    await vi.advanceTimersByTimeAsync(4100)
+    expect(txt()).toContain('this sign-in expired')
+    ;(document.querySelector('.overlay') as HTMLElement).click()
+    await flushPromises()
+    expect(w.emitted('close')).toHaveLength(1)
+    w.unmount()
+  })
+
+  it('the problem text is announced once: no role=alert inside the live region', async () => {
+    apiSend.mockResolvedValueOnce({ attempt_id: 5, status: 'pending' })
+    apiGet.mockResolvedValue(at('failed', { error: 'wrong password' }))
+    const w = await openDialog()
+    await flushPromises()
+    const live = document.querySelector('[aria-live]') as HTMLElement
+    expect(live.textContent).toContain('wrong password')
+    expect(live.querySelector('[role=alert]')).toBeNull()
+    w.unmount()
+  })
+})

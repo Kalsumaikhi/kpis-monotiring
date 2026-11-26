@@ -2,7 +2,6 @@ import hashlib
 import json
 
 import pytest
-from fastapi.testclient import TestClient
 
 from app.api import deps
 from app.api.main import create_app
@@ -12,7 +11,7 @@ from app.core import pipeline
 from app.core.canonical import RawRow
 from app.models import Run, Source, WatchSnapshot, WatchTarget
 from app.notify.mattermost import format_run_message
-from tests.conftest import FakeConnector
+from tests.conftest import FakeConnector, api_client
 
 BASE = "http://dash"
 
@@ -170,7 +169,7 @@ def test_page_change_excerpt_in_changes_api(pages, db_session, session_factory, 
     monkeypatch.setattr(get_settings(), "dashboard_password", "secret")
     app = create_app()
     app.dependency_overrides[deps.get_session] = lambda: db_session
-    client = TestClient(app)
+    client = api_client(app)
     client.auth = ("u", "secret")
     items = client.get(f"/api/runs/{run.id}/changes").json()["items"]
     assert items[0]["dataset"] == "page"

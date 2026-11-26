@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import re
 import secrets
-from contextlib import contextmanager
+import shutil
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
 
@@ -13,14 +14,14 @@ import httpx
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel, field_validator
 from sqlalchemy import delete, func, select, update
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, InvalidRequestError
 from sqlalchemy.orm import Session
 
 from app import watch_import
 from app.api.deps import get_session
-from app.api.util import iso
+from app.api.util import iso, source_lock as _source_lock
 from app.connectors.watch import noisy_target_ids
-from app.core.pipeline import SourceBusyError, _acquire_source_lock, _supersede_held
+from app.core.pipeline import _supersede_held
 from app.core.canonical import dims_to_json, key_hash_for
 from app.connectors.watch.connector import _process
 from app.connectors.watch.extract import flatten_json
@@ -29,7 +30,11 @@ from app import logins
 from app.connectors.watch.fetch import (
     NEEDS_HTTPS, NO_BROWSER_KEY, FetchState, fetch_target, preflight,
 )
-from app.models import Credential, DataPoint, ImportPreview, Indicator, Source, WatchTarget
+from app.config import get_settings
+from app.models import (
+    Change, ChangeRollup, Credential, DataPoint, ImportPreview, Indicator, PendingChange, Run,
+    Source, Upload, WatchTarget,
+)
 
 router = APIRouter()
 
@@ -172,8 +177,20 @@ def _conflict(session: Session, source_id: int, kpi_name: str, url: str,
         q = q.where(WatchTarget.id != exclude_id)
     for t in session.scalars(q.where((WatchTarget.url == url) | (func.lower(WatchTarget.kpi_name) == kpi_name.lower()))):
         return "a KPI with this link already exists" if t.url == url else \
-            "a KPI with this name already exists in the source"
+            NAME_TAKEN
     return None
+
+
+NAME_TAKEN = "a KPI with this name already exists in this source"
+NAME_INDEX = "uq_watch_targets_source_lower_kpi_name"
+
+
+def _integrity_409(e: IntegrityError, fallback: str) -> HTTPException:
+    """409 for a constraint hit (a race the app-level check lost); names the KPI-name index."""
+    diag = getattr(getattr(e, "orig", None), "diag", None)
+    if getattr(diag, "constraint_name", None) == NAME_INDEX:
+        return HTTPException(409, NAME_TAKEN)
+    return HTTPException(409, fallback)
 
 
 def _delete_points(session: Session, source_id: int, kpi_name: str) -> None:
@@ -220,9 +237,9 @@ def create_target(body: TargetIn, session: Session = Depends(get_session)):
         t = _add_target(session, source, body.kpi_name, body.url, body.kind, body.selector,
                         use_browser, body.credential_id)
         session.commit()
-    except IntegrityError:
+    except IntegrityError as e:
         session.rollback()
-        raise HTTPException(409, "conflicting source or KPI") from None
+        raise _integrity_409(e, "conflicting source or KPI") from None
     return _target_json(t, key_name=_key_name(session, t.credential_id))
 
 
@@ -233,26 +250,50 @@ def _target_or_404(session: Session, target_id: int) -> WatchTarget:
     return t
 
 
-@contextmanager
-def _source_lock(session: Session, source_id: int):
-    """Non-blocking per-source advisory lock (same as run_source); 409 while a run holds it."""
+def _reload_target(session: Session, t: WatchTarget) -> None:
+    """Under the source lock: re-read the target (it may have changed while we waited);
+    404 when it was deleted meanwhile."""
     try:
-        release = _acquire_source_lock(session, source_id)
-    except SourceBusyError:
-        session.rollback()
-        raise HTTPException(409, "source is running, try again") from None
-    try:
-        yield
-    finally:
-        release()
+        session.refresh(t)
+    except InvalidRequestError:  # the row is gone
+        raise HTTPException(404, "target not found") from None
 
 
-@router.patch("/watch-targets/{target_id}")
-def patch_target(target_id: int, body: TargetPatch, session: Session = Depends(get_session)):
-    t = _target_or_404(session, target_id)
+@router.delete("/custom-sources/{slug}", status_code=204)
+def delete_custom_source(slug: str, session: Session = Depends(get_session)):
+    """Remove a custom source with all its rows and raw files. Silent: no Mattermost post.
+    Keys and logins are shared and stay."""
+    src = session.scalar(select(Source).where(
+        Source.slug == slug, Source.access == "watch", Source.area == "custom"))
+    if src is None:
+        raise HTTPException(404, "custom source not found")
+    sid = src.id
+    with _source_lock(session, sid, "a check is running for this source; try again when it finishes"):
+        if session.scalar(select(Source.id).where(Source.id == sid)) is None:
+            raise HTTPException(404, "custom source not found")  # deleted while we waited
+        raw_files = [p for p in session.scalars(
+            select(Run.raw_path).where(Run.source_id == sid, Run.raw_path.is_not(None)))]
+        # Tables without ON DELETE CASCADE go by hand, children of runs first.
+        for model in (Change, PendingChange, Upload, DataPoint, Indicator, ChangeRollup):
+            session.execute(delete(model).where(model.source_id == sid))
+        session.execute(delete(WatchTarget).where(WatchTarget.source_id == sid))  # snapshots cascade
+        session.execute(delete(Run).where(Run.source_id == sid))
+        session.execute(delete(Source).where(Source.id == sid))
+        session.commit()
+    raw_root = Path(get_settings().raw_dir).resolve()
+    for f in raw_files:
+        fp = Path(f).resolve()
+        if fp.is_relative_to(raw_root):
+            fp.unlink(missing_ok=True)
+    d = (raw_root / slug).resolve()
+    if d.parent == raw_root:  # a direct child of raw_dir only; never follow a slug out of it
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def _plan_patch(session: Session, t: WatchTarget, body: TargetPatch) -> tuple[str, str, bool, bool]:
+    """(new name, new link, browser mode, needs the source lock) for `body` applied to `t`."""
     new_name = body.kpi_name if body.kpi_name is not None else t.kpi_name
     new_url = body.url if body.url is not None else t.url
-    renames, repoints = new_name != t.kpi_name, new_url != t.url
     new_key = body.credential_id if "credential_id" in body.model_fields_set else t.credential_id
     if body.use_browser is not None:
         wanted = body.use_browser
@@ -261,18 +302,29 @@ def patch_target(target_id: int, body: TargetPatch, session: Session = Depends(g
     else:
         wanted = t.use_browser
     use_browser = _check_key(session, new_key, new_url, wanted)
-    disables = body.enabled is False and t.enabled
-    if not (renames or repoints or disables):
+    # A key change sets needs_baseline; under the lock no run can be fetching with the old key
+    # (and clear the flag when it finishes), and a held run diffed with the old key is dropped.
+    locked = (new_name != t.kpi_name or new_url != t.url or (body.enabled is False and t.enabled)
+              or new_key != t.credential_id)
+    return new_name, new_url, use_browser, locked
+
+
+@router.patch("/watch-targets/{target_id}")
+def patch_target(target_id: int, body: TargetPatch, session: Session = Depends(get_session)):
+    t = _target_or_404(session, target_id)
+    new_name, new_url, use_browser, locked = _plan_patch(session, t, body)
+    if not locked:
         _apply_patch(session, t, body, new_name, new_url, use_browser)
         return _target_json(t, key_name=_key_name(session, t.credential_id))
     with _source_lock(session, t.source_id):
-        session.refresh(t)  # state may have changed while waiting
+        _reload_target(session, t)  # state may have changed while waiting: plan again from it
+        new_name, new_url, use_browser, _ = _plan_patch(session, t, body)
         _apply_patch(session, t, body, new_name, new_url, use_browser, supersede=True)
     return _target_json(t, key_name=_key_name(session, t.credential_id))
 
 
 # Held runs were diffed against the targets as they were; applying one after a KPI changed
-# would write data under a stale name or link, so changing a KPI drops them.
+# would write data under a stale name, link or key, so changing a KPI drops them.
 HELD_REASON = "a change to the source's KPIs"
 
 
@@ -321,16 +373,16 @@ def _apply_patch(session: Session, t: WatchTarget, body: TargetPatch, new_name: 
         if supersede:
             _supersede_held(session, t.source_id, reason=HELD_REASON)
         session.commit()
-    except IntegrityError:
+    except IntegrityError as e:
         session.rollback()
-        raise HTTPException(409, "conflicting KPI") from None
+        raise _integrity_409(e, "conflicting KPI") from None
 
 
 @router.delete("/watch-targets/{target_id}", status_code=204)
 def delete_target(target_id: int, session: Session = Depends(get_session)):
     t = _target_or_404(session, target_id)
     with _source_lock(session, t.source_id):
-        session.refresh(t)
+        _reload_target(session, t)
         _delete_points(session, t.source_id, t.kpi_name)
         session.execute(delete(Indicator).where(
             Indicator.source_id == t.source_id, Indicator.code == t.kpi_name))
@@ -473,30 +525,44 @@ def import_confirm(body: ConfirmIn, session: Session = Depends(get_session)):
         raise HTTPException(410, "import preview expired")
     try:
         return _confirm_rows(session, rows)
-    except IntegrityError:
+    except IntegrityError as e:
         session.rollback()
-        raise HTTPException(409, "import conflicts with existing sources, try again") from None
+        raise _integrity_409(e, "import conflicts with existing sources, try again") from None
 
 
 def _confirm_rows(session: Session, rows: list[dict]) -> dict:
+    """Create the importable rows. Rows the preview showed as duplicate or invalid are
+    skipped silently (the preview said why); a row that can no longer be imported because
+    something changed since the preview is skipped with its reason in `skipped_rows`."""
     created_sources = created_targets = skipped = 0
+    skipped_rows: list[dict] = []
     known_keys = {row.id: row for row in session.scalars(select(Credential))}
+
+    def skip(r: dict, reason: str) -> None:
+        skipped_rows.append({"row": r.get("row"), "source_name": r["source_name"],
+                             "kpi_name": r["kpi_name"], "reason": reason})
+
     for r in rows:
         if r["status"] not in ("new_source", "existing_source"):
             skipped += 1
             continue
         cid = r.get("credential_id")
         if cid is not None and cid not in known_keys:
-            skipped += 1  # key deleted since the preview
+            skipped += 1
+            skip(r, "the key was deleted since the preview")
             continue
         # The key may have changed since the preview: decide browser mode and hosts now.
         use_browser = cid is not None and known_keys[cid].kind == "login"
-        if use_browser and creds.login_host_error(known_keys[cid], r["url"]):
+        host_err = creds.login_host_error(known_keys[cid], r["url"]) if use_browser else None
+        if host_err:
             skipped += 1
+            skip(r, host_err)
             continue
         source = _find_source(session, r["source_name"])
-        if source is not None and _conflict(session, source.id, r["kpi_name"], r["url"]):
+        msg = _conflict(session, source.id, r["kpi_name"], r["url"]) if source is not None else None
+        if msg:
             skipped += 1  # created since the preview
+            skip(r, msg)
             continue
         if source is None:
             source = _new_source(session, r["source_name"])
@@ -506,4 +572,4 @@ def _confirm_rows(session: Session, rows: list[dict]) -> dict:
         created_targets += 1
     session.commit()
     return {"created_sources": created_sources, "created_targets": created_targets,
-            "skipped": skipped}
+            "skipped": skipped, "skipped_rows": skipped_rows}

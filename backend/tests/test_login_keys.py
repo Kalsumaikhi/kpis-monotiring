@@ -1,13 +1,13 @@
 import pytest
 from cryptography.fernet import Fernet
-from fastapi.testclient import TestClient
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 
 from app import credentials as creds
 from app.api import deps
 from app.api.main import create_app
 from app.config import get_settings
+from tests.conftest import api_client
 
 PASSWORD = "hunter2-password"
 
@@ -23,7 +23,7 @@ def client(db_session, session_factory, monkeypatch):
     app = create_app()
     app.dependency_overrides[deps.get_session] = lambda: db_session
     app.dependency_overrides[deps.get_session_factory] = lambda: session_factory
-    c = TestClient(app)
+    c = api_client(app)
     c.auth = ("anyone", "secret")
     return c
 
@@ -218,7 +218,7 @@ def test_downgrade_refused_with_login_keys(db_engine):
     from sqlalchemy import create_engine
     from sqlalchemy.engine import make_url
     base = make_url(db_engine.url.render_as_string(hide_password=False))
-    name = "kpi_test_dg"
+    name = f"{base.database}_dg"  # per test DB, so parallel test DBs never share it
     url = base.set(database=name)
     with db_engine.connect().execution_options(isolation_level="AUTOCOMMIT") as c:
         c.execute(text(f"DROP DATABASE IF EXISTS {name}"))
@@ -235,12 +235,17 @@ def test_downgrade_refused_with_login_keys(db_engine):
         with e.begin() as c:
             c.execute(text("INSERT INTO credentials (name, kind, secret_enc, login_url, username) "
                            "VALUES ('x','login','\\x01','https://a.example.com/','u')"))
+        with e.connect() as c:
+            head = c.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
         r = alembic("downgrade", "0007")
         assert r.returncode != 0 and "delete login keys before downgrading 0008" in r.stderr
         with e.connect() as c:
             assert c.execute(text("SELECT count(*) FROM credentials")).scalar_one() == 1
-            assert c.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "0008"
+            assert c.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == head
             assert c.execute(text("SELECT to_regclass('login_sessions')")).scalar_one() is not None
+            assert c.execute(text(
+                "SELECT 1 FROM information_schema.columns WHERE table_name = 'sources' "
+                "AND column_name = 'needs_baseline'")).first() is not None
         with e.begin() as c:
             c.execute(text("DELETE FROM credentials"))
         assert alembic("downgrade", "0007").returncode == 0
@@ -248,3 +253,101 @@ def test_downgrade_refused_with_login_keys(db_engine):
     finally:
         with db_engine.connect().execution_options(isolation_level="AUTOCOMMIT") as c:
             c.execute(text(f"DROP DATABASE IF EXISTS {name} WITH (FORCE)"))
+
+
+def test_migration_0009_downgrade_and_upgrade(db_engine):
+    import subprocess
+    import sys
+    from pathlib import Path
+    from sqlalchemy import create_engine
+    from sqlalchemy.engine import make_url
+    base = make_url(db_engine.url.render_as_string(hide_password=False))
+    name = f"{base.database}_m9"
+    url = base.set(database=name)
+    with db_engine.connect().execution_options(isolation_level="AUTOCOMMIT") as c:
+        c.execute(text(f"DROP DATABASE IF EXISTS {name}"))
+        c.execute(text(f"CREATE DATABASE {name}"))
+    env = {**__import__("os").environ, "DATABASE_URL": url.render_as_string(hide_password=False)}
+
+    def alembic(*args):
+        r = subprocess.run([sys.executable, "-m", "alembic", *args], env=env,
+                           cwd=str(Path(__file__).resolve().parent.parent),
+                           capture_output=True, text=True)
+        assert r.returncode == 0, r.stderr
+    has_col = text("SELECT 1 FROM information_schema.columns WHERE table_name = 'sources' "
+                   "AND column_name = 'needs_baseline'")
+    e = create_engine(url)
+    try:
+        alembic("upgrade", "0009")
+        with e.begin() as c:
+            assert c.execute(has_col).first() is not None
+            c.execute(text("INSERT INTO sources (slug, name, area, access, needs_baseline) "
+                           "VALUES ('s', 'S', 'a', 'manual', true)"))
+        alembic("downgrade", "0008")
+        with e.connect() as c:
+            assert c.execute(has_col).first() is None
+            assert c.execute(text("SELECT count(*) FROM sources")).scalar_one() == 1
+        alembic("upgrade", "head")
+        with e.connect() as c:
+            assert c.execute(has_col).first() is not None
+            assert c.execute(text("SELECT needs_baseline FROM sources")).scalar_one() is False
+    finally:
+        e.dispose()
+        with db_engine.connect().execution_options(isolation_level="AUTOCOMMIT") as c:
+            c.execute(text(f"DROP DATABASE IF EXISTS {name} WITH (FORCE)"))
+
+
+# --- login edits with dependants (plan 3a task 5, item 3) -------------------------
+
+def _targets(db_session, cid, specs):
+    from app.models import Source, WatchTarget
+    src = Source(slug="s-hosts", name="S", area="custom", access="watch")
+    db_session.add(src)
+    db_session.flush()
+    for i, (name, host, enabled) in enumerate(specs):
+        db_session.add(WatchTarget(source_id=src.id, kpi_name=name, url=f"https://{host}/p{i}",
+                                   use_browser=True, enabled=enabled, credential_id=cid))
+    db_session.flush()
+
+
+def test_login_host_change_with_dependant_kpis_409(client, db_session):
+    cid = client.post("/api/credentials", json=body(extra_hosts=["app.example.com"])).json()["id"]
+    _targets(db_session, cid, [("On portal", "portal.example.com", True),
+                               ("On app", "app.example.com", True),
+                               ("Off", "old.example.com", False)])
+    r = client.patch(f"/api/credentials/{cid}", json={"login_url": "https://new.example.com/login"})
+    assert r.status_code == 409
+    assert r.json()["kpis"] == ["On portal"]
+    assert "On portal" in r.json()["detail"]
+    r = client.patch(f"/api/credentials/{cid}", json={"extra_hosts": []})
+    assert r.status_code == 409 and r.json()["kpis"] == ["On app"]
+    # nothing was saved
+    item = next(k for k in client.get("/api/credentials").json() if k["id"] == cid)
+    assert item["login_url"] == "https://Portal.example.com/login"
+    assert item["extra_hosts"] == ["app.example.com"]
+    # edits that keep every enabled KPI's host are fine (a disabled KPI does not block)
+    assert client.patch(f"/api/credentials/{cid}",
+                        json={"extra_hosts": ["app.example.com", "more.example.com"]}).status_code == 200
+    assert client.patch(f"/api/credentials/{cid}",
+                        json={"login_url": "https://PORTAL.example.com/signin"}).status_code == 200
+
+
+def test_login_host_409_lists_at_most_five(client, db_session):
+    cid = client.post("/api/credentials", json=body()).json()["id"]
+    _targets(db_session, cid, [(f"K{i}", "portal.example.com", True) for i in range(7)])
+    r = client.patch(f"/api/credentials/{cid}", json={"login_url": "https://x.example.com/l"})
+    assert r.status_code == 409
+    assert r.json()["kpis"] == ["K0", "K1", "K2", "K3", "K4"] and r.json()["more"] == 2
+    assert r.json()["detail"].endswith("K0, K1, K2, K3, K4 +2 more")
+
+
+def test_stranded_check_runs_under_the_source_locks(client, db_session, held_lock):
+    """The stranded-KPI check reads the KPIs only once their sources are locked: while a
+    check runs, the edit is refused as busy before anything is decided."""
+    from app.models import Source
+    cid = client.post("/api/credentials", json=body()).json()["id"]
+    _targets(db_session, cid, [("On portal", "portal.example.com", True)])
+    held_lock(db_session.scalar(select(Source.id).where(Source.slug == "s-hosts")))
+    r = client.patch(f"/api/credentials/{cid}", json={"login_url": "https://new.example.com/login"})
+    assert r.status_code == 409 and "kpis" not in r.json()
+    assert r.json()["detail"].startswith("a check is running")

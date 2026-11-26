@@ -67,6 +67,53 @@ describe('ChangeFeedPage', () => {
     expect(router.currentRoute.value.query.changes).toBe('0')
     expect(apiGet.mock.calls.filter((c) => c[0] === '/api/runs').at(-1)![1].has_changes).toBeUndefined()
   })
+
+  it('area and change type filters call the API, reset the page and make history entries', async () => {
+    apiGet.mockImplementation(async (path: string) => (path === '/api/sources' ? [{ slug: 'a', name: 'A', area: 'economic' }, { slug: 'm', name: 'M', area: 'military' }, { slug: 'c', name: 'C', area: 'custom' }, { slug: 's', name: 'S', area: 'social' }] : { items: [], total: 0 }))
+    const router = mkRouter()
+    await router.push('/changes?page=3')
+    const w = mount(ChangeFeedPage, { global: { plugins: [router] } })
+    await flushPromises()
+    const lastRuns = () => apiGet.mock.calls.filter((c) => c[0] === '/api/runs').at(-1)![1]
+    expect(lastRuns().area || undefined).toBeUndefined() // '' is dropped by apiGet
+    expect(lastRuns().change || undefined).toBeUndefined()
+
+    const opts = Array.from(w.get('#f-area').element.querySelectorAll('option')).map((o) => o.textContent)
+    expect(opts).toEqual(['All areas', 'Custom sources', 'Economic', 'Military', 'Social'])
+    await w.get('#f-area').setValue('military')
+    await flushPromises()
+    expect(router.currentRoute.value.query).toMatchObject({ area: 'military' })
+    expect(router.currentRoute.value.query.page).toBeUndefined()
+    expect(lastRuns()).toMatchObject({ area: 'military', page: 1 })
+
+    await w.get('#f-change').setValue('altered')
+    await flushPromises()
+    expect(router.currentRoute.value.query).toMatchObject({ area: 'military', change: 'altered' })
+    expect(lastRuns()).toMatchObject({ area: 'military', change: 'altered' })
+
+    router.back()
+    await flushPromises()
+    expect(router.currentRoute.value.query.change).toBeUndefined()
+    expect(router.currentRoute.value.query.area).toBe('military')
+    expect((w.get('#f-change').element as HTMLSelectElement).value).toBe('')
+    expect(lastRuns().change || undefined).toBeUndefined()
+    w.unmount()
+  })
+
+  it('pager page change pushes history', async () => {
+    apiGet.mockImplementation(async (path: string) => (path === '/api/sources' ? [] : { items: [run()], total: 120 }))
+    const router = mkRouter()
+    await router.push('/changes')
+    const w = mount(ChangeFeedPage, { global: { plugins: [router] } })
+    await flushPromises()
+    await w.findAll('button').find((b) => b.text() === 'Next')!.trigger('click')
+    await flushPromises()
+    expect(router.currentRoute.value.query.page).toBe('2')
+    router.back()
+    await flushPromises()
+    expect(router.currentRoute.value.query.page).toBeUndefined()
+    w.unmount()
+  })
 })
 
 describe('RunDetailPage', () => {

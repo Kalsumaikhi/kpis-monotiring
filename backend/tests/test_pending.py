@@ -1,5 +1,4 @@
 import pytest
-from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 
 from app.api import deps
@@ -10,7 +9,7 @@ from app.core.canonical import RawRow
 from app.api.main import create_app
 from app.models import Change, DataPoint, PendingChange, Run, Source
 from app.worker import poll_queued_once, sweep_stale_runs
-from tests.conftest import FakeConnector
+from tests.conftest import FakeConnector, api_client
 
 AUTH = ("u", "secret")
 
@@ -35,7 +34,7 @@ def client(db_session, session_factory, monkeypatch):
     app = create_app()
     app.dependency_overrides[deps.get_session] = lambda: db_session
     app.dependency_overrides[deps.get_session_factory] = lambda: session_factory
-    c = TestClient(app)
+    c = api_client(app)
     c.auth = AUTH
     return c
 

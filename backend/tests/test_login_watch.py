@@ -15,7 +15,6 @@ import httpx
 import pytest
 import respx
 from cryptography.fernet import Fernet
-from fastapi.testclient import TestClient
 from sqlalchemy import func, select, update
 
 from app import credentials as creds
@@ -37,6 +36,7 @@ from app.models import (
     WatchTarget,
 )
 from app.notify.mattermost import format_run_message
+from tests.conftest import api_client
 
 AUTH = ("anyone", "secret")
 USER = "me@example.com"
@@ -69,7 +69,7 @@ def client(db_session, session_factory, monkeypatch):
     app = create_app()
     app.dependency_overrides[deps.get_session] = lambda: db_session
     app.dependency_overrides[deps.get_session_factory] = lambda: session_factory
-    c = TestClient(app)
+    c = api_client(app)
     c.auth = AUTH
     return c
 
@@ -865,3 +865,62 @@ def test_all_failed_mixed_with_other_errors_still_fails(tmp_path):
         {"id": 2, "kpi_name": "B", "status": "error", "error": "HTTP 500"}]}))
     with pytest.raises(RuntimeError, match="all targets failed"):
         WatchConnector.parse(object.__new__(WatchConnector), raw)
+
+
+# --- shared login re-signed by another source meanwhile (plan 3a task 5, item 4) -------
+
+def _resign_elsewhere(sf, cid, site, sid="other"):
+    """Another source's run signs the shared login in again (as its _save_ok would)."""
+    with sf() as s:
+        s.execute(update(LoginSession).where(LoginSession.credential_id == cid).values(
+            status="ok", state_enc=creds.encrypt(json.dumps(sid_state(sid))), last_error=None,
+            updated_at=func.clock_timestamp()))
+        s.commit()
+    site.valid.add(sid)
+
+
+@respx.mock
+def test_shared_login_resigned_elsewhere_refetches_once(wenv, db_session, monkeypatch):
+    src, sf = wenv
+    site = FakeSite(monkeypatch, valid=())
+    c = mk_login(db_session, status="ok", state=sid_state("old"))
+    t = add_target(db_session, src, c)
+    calls = []
+
+    def once(url):
+        if not calls:
+            calls.append(url)
+            _resign_elsewhere(sf, c.id, site)
+
+    site.on_fetch = once
+    robots()
+    r = run(sf)
+    assert site.sign_ins == 0  # no sign-in of our own
+    assert [s["cookies"][0]["value"] for _, s in site.fetches] == ["old", "other"]
+    db_session.expire_all()
+    assert db_session.get(WatchTarget, t.id).last_status == "ok"
+    assert r.status == "baseline"
+    assert session_row(db_session, c.id).status == "ok"
+
+
+@respx.mock
+def test_shared_login_refetch_is_tried_only_once(wenv, db_session, monkeypatch):
+    """The other source's session does not work either: login_needed, no loop."""
+    src, sf = wenv
+    site = FakeSite(monkeypatch, valid=())
+    c = mk_login(db_session, status="ok", state=sid_state("old"))
+    add_target(db_session, src, c, "https://portal.example/a", "A")
+    add_target(db_session, src, c, "https://portal.example/b", "B")
+
+    def again(url):  # every fetch: someone else re-signed in, with a session that fails
+        _resign_elsewhere(sf, c.id, site, sid=f"x{len(site.fetches)}")
+        site.valid.clear()
+
+    site.on_fetch = again
+    robots()
+    run(sf)
+    assert site.sign_ins == 0
+    assert len(site.fetches) == 3  # A, A once more with the reloaded session, B (no retry)
+    db_session.expire_all()
+    assert {t.last_status for t in db_session.scalars(
+        select(WatchTarget).where(WatchTarget.source_id == src.id))} == {"login_needed"}

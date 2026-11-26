@@ -64,6 +64,12 @@ The KPI frequency and explorer views read per-day counts from `change_rollup`. M
 
 `GET /api/health` is public. All other routes need HTTP Basic auth (any username, password = `DASHBOARD_PASSWORD`).
 
+Every POST, PUT, PATCH and DELETE under `/api/` must also send `X-Requested-With: kpi-monitor`, or the api answers 403 `missing X-Requested-With`. Browsers resend Basic auth on a form post from another site, but such a form cannot set this header, so it blocks cross-site requests. The dashboard sends it on every call. When scripting with curl:
+
+```sh
+curl -u x:$DASHBOARD_PASSWORD -H 'X-Requested-With: kpi-monitor' -X POST localhost:8000/api/sources/{slug}/run
+```
+
 - `GET /api/sources`, `PATCH /api/sources/{slug}`, `POST /api/sources/{slug}/run`
 - `GET /api/runs`, `GET /api/runs/{id}`, `GET /api/runs/{id}/changes`
 - `POST /api/runs/{id}/approve`, `POST /api/runs/{id}/reject`
@@ -78,6 +84,8 @@ TEST_DATABASE_URL=postgresql+psycopg://kpi:kpi@localhost:5432/kpi_test uv run py
 ```
 
 ## Data and licensing
+
+**Licences are yours to provide.** The tool never fetches licensed or key-protected data on its own: a source that needs a key or a login runs only after you add your own (Settings → Keys) and pick it for that source; without one, it does not run. By running a source you accept that source's terms of use. For SIPRI, commercial or business use needs your own SIPRI licence; the attribution lines below must stay either way.
 
 - **World Bank WDI**: CC BY 4.0. Attribute the World Bank.
 - **SIPRI Military Expenditure Database**: free to download, cite and use for statistical or analytical purposes under its fair-use policy: non-commercial use and reproducing less than 10 per cent of the data set. Attribution is required ("Information from the Stockholm International Peace Research Institute (SIPRI) Military Expenditure Database, https://doi.org/10.55163/CQGC9685"). Commercial use, including internal tools for business advantage, needs a SIPRI licence. See the SIPRI terms and conditions.
@@ -99,12 +107,14 @@ npm run build    # type-check and build to dist/
 
 All colours are CSS custom properties in `frontend/src/styles/tokens.css`, with light and dark themes.
 
+**Chart colours.** Lines are drawn in a fixed order: Mid Green (the brand colour) first, then blue, magenta, olive, violet and teal, each with its own dash pattern, so lines stay distinguishable for colour-blind readers and in print. The brand's other greens are too light or too dark to tell six lines apart, so they are used for the interface, not for lines. Amber and red are never used for lines: they always mean "altered" and "removed". A chart shows at most 6 lines; pick which ones under the chart.
+
 ### Pages
 
 | Page | What it does |
 |---|---|
 | Overview | One card per source: last run, rows tracked, changes in 30 days, "Run now" |
-| Changes | Run feed with filters; open a run for its change list (page changes show a `+`/`−` text excerpt) |
+| Changes | Run feed filtered by source, area, change type (added/altered/removed), status and date; open a run for its change list (page changes show a `+`/`−` text excerpt) |
 | Explorer | Source → indicator → country, with a chart, data points and change history |
 | KPI frequency | How often each indicator changes (30 days, 12 months, all time) |
 | Uploads | Manual uploads |
@@ -123,6 +133,8 @@ Besides the built-in datasets you can watch any web page or JSON API link (Setti
 
 - **Add KPI**: source name, KPI name, link. "Test link" shows what would be read. Under Advanced you can set a CSS selector (focus area), force page/API mode, or ask for a headless browser for JavaScript-built pages.
 - **Import from Excel/CSV**: a `.xlsx` or `.csv` with the columns `Source name`, `KPI name`, `Link` and optionally `Key name` (see Keys below; the dialog offers a template). The preview marks each row as new, existing, duplicate (skipped) or invalid before anything is created.
+- **Delete a source**: "Delete source" on a custom source removes the source, its KPIs, their history and change records, and its saved page copies. Keys and logins are kept. It is refused while a check of that source is running; try again when it finishes. Nothing is posted to Mattermost.
+- **KPI names** are unique within a source (ignoring upper/lower case); adding or renaming to a clashing name is refused, and the import skips such rows with the reason shown.
 - **Renaming a KPI** keeps its current value but starts its change history fresh: past changes stay in the change feed and run details under the old name, while the explorer and KPI frequency count only changes recorded after the rename.
 - **First check**: a new KPI's first check only records a baseline; no change alert is sent. Alerts (and Mattermost messages) start with the second check that finds a change; built-in sources still post a one-line "baseline loaded" note. The Mattermost message lists the changed KPI pages with a short `+`/`-` excerpt in a code block (page text is shown as code, so it cannot format the message or @mention anyone).
 - **Politeness and safety**: `robots.txt` is respected, requests are limited to 1 per second per host, and links to internal addresses (loopback, private ranges) are blocked unless the host is listed in `WATCH_ALLOWED_HOSTS`. Redirects are re-checked on every hop. In browser mode, Chromium sends all its traffic (page, images, scripts, redirects, HTTPS and WebSockets) through a small built-in proxy that applies the same block, and WebRTC UDP is disabled.
@@ -157,6 +169,8 @@ Any other string also works (it is hashed into a key), but a generated Fernet ke
 - **Secrets stay secret.** They never appear in API responses, logs, run errors, snapshots, raw files, previews or Mattermost messages (a stored secret is replaced by `***` if a site echoes it back).
 - **Import.** The CSV/Excel import accepts an optional fourth column, `Key name` (matched ignoring case and spaces). An unknown name marks the row invalid (`unknown key: ...`).
 - **Built-in sources.** Per-source keys appear only for connectors that declare key hosts.
+- **Changing a key is quiet.** Picking a different key, or editing what a key sends (secret, type, header, parameter, username, extra hosts, login address), makes the next check of every source and KPI using it a silent baseline: the new data is stored without change alerts, because a different key or licence tier can return different data. If that first check finds far fewer rows than before, nothing is deleted and a warning is posted; if the next check is short too, it again keeps them and warns; from the check after that, missing rows are held for your review as usual. (This applies to built-in sources; for custom KPIs the first check after a key change is simply silent.)
+- **Not during a check.** A key change is refused while a check of an affected source is running; try again when it finishes. A batch of changes held for review that was fetched with the old key is set aside, so it can't be approved by mistake.
 
 ## Logins
 
@@ -171,6 +185,8 @@ Some sites only show their numbers after you sign in on their own sign-in page, 
   - **Also used on**: other site names this login covers, separated by commas or spaces (for example `app.example.com, data.example.com`). Use it when you sign in on one site name but the numbers live on another.
 
 Then add a KPI as usual and pick the login in its "Key" list. The KPI's link must be on the login page's site, or on a site listed under "Also used on"; otherwise saving is refused with a message that tells you to add it there. KPIs with a login always use the built-in browser, so "Needs a browser" is ticked for you. A login can only be used by KPIs, not by built-in sources (Settings doesn't offer it there, and the server refuses it).
+
+Editing a login's address or its "Also used on" list is refused if an enabled KPI would no longer be covered; the message lists up to five of those KPIs. Move or disable them first.
 
 **How it works.**
 
@@ -198,7 +214,7 @@ Until you sign in, the monitor does not keep trying by itself, so the site doesn
 - "Sign in with Google/Microsoft/…" and other single sign-on through another company's sign-in page.
 - Sign-in pages that aren't `https://`.
 
-**Safety.** The password and codes are never shown, logged, or saved in plain text. They are kept out of run errors, raw files, page snapshots and Mattermost. A code is kept (encrypted) only until it has been typed in, then wiped. The password is only ever typed into the saved login page's site (or an "Also used on" site), and the saved session is only used for those sites. The login site's own page scripts are trusted, as in any browser you sign in with.
+**Safety.** The password, codes and the saved session's cookies are never shown, logged, or saved in plain text. They are kept out of run errors, raw files, page snapshots and Mattermost. A code is kept (encrypted) only until it has been typed in, then wiped. The password is only ever typed into the saved login page's site (or an "Also used on" site), and the saved session is only used for those sites. The login site's own page scripts are trusted, as in any browser you sign in with.
 
 **robots.txt.** The KPI pages behind a login are checked against the site's robots.txt as usual, but the sign-in page itself is not: sites often disallow `/login` for crawlers, and signing in is something you asked the monitor to do on your behalf.
 

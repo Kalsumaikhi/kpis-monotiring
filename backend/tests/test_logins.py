@@ -436,3 +436,50 @@ def test_unnamed_code_box_wrong_code_fails(site):
     with pytest.raises(logins.LoginFailed) as e:
         logins.sign_in(cred_for(site), lambda: "000000", timeout_s=30)
     assert str(e.value) == "code was not accepted"
+
+
+@browser
+def test_browser_fetch_redacts_seeded_cookie_values(site):
+    """A page that echoes the session cookie never puts its value in the result."""
+    cred = cred_for(site)
+    state = logins.sign_in(cred, None)
+    sid = next(c["value"] for c in state["cookies"] if c["name"] == "sid")
+    assert len(sid) >= 8
+    short = {"name": "lang", "value": "DATA", "domain": "localhost", "path": "/"}
+    state = {**state, "cookies": state["cookies"] + [short]}
+    res, _, _ = logins.browser_fetch(site.url("/echo-cookie"), cred, state)
+    assert res.status == "ok"
+    assert sid.encode() not in res.body
+    assert b"sid=***" in res.body
+    assert PROTECTED.encode() in res.body  # a short value ("DATA") is left alone
+
+
+def _ck(name, value, http_only=True):
+    return {"name": name, "value": value, "domain": "localhost", "path": "/", "httpOnly": http_only}
+
+
+def test_secret_forms_cover_escaped_spellings():
+    v = 'a/b c&d"e<f>'
+    forms = creds.secret_forms(v)
+    for f in (v, "a%2Fb%20c%26d%22e%3Cf%3E", "a%2Fb+c%26d%22e%3Cf%3E", 'a/b c&d\\"e<f>',
+              'a\\/b c&d\\"e<f>', "a/b c&amp;d&quot;e&lt;f&gt;"):
+        assert f in forms, f
+
+
+def test_redact_cookies_thresholds_forms_and_both_states():
+    sess = "s3ss10n/v+alue&x"  # httpOnly, 16 chars
+    short_ho = "abcd1234"  # httpOnly, 8 chars: redacted
+    consent = "accepted"  # not httpOnly, 8 chars: left alone
+    tracker = "t" * 16  # not httpOnly, 16 chars: redacted
+    rotated = "rotated-session-value"  # only in the state after the fetch
+    seed = {"cookies": [_ck("sid", sess), _ck("k", short_ho), _ck("consent", consent, False),
+                        _ck("trk", tracker, False), _ck("lang", "en")]}
+    out = {"cookies": [_ck("sid", rotated)]}
+    from urllib.parse import quote
+    body = (f"<p>{sess}|{quote(sess, safe='')}|{json.dumps(sess)}|{short_ho}|{consent}|"
+            f"{tracker}|{rotated}|s3ss10n/v+alue&amp;x|en</p>").encode()
+    got = logins._redact_cookies(body, seed, out).decode()
+    for secret in (sess, quote(sess, safe=""), short_ho, tracker, rotated, "s3ss10n/v+alue&amp;x"):
+        assert secret not in got, secret
+    assert "|accepted|" in got and got.endswith("|en</p>")
+    assert logins._redact_cookies(b"x", None, None) == b"x"

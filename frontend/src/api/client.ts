@@ -54,10 +54,13 @@ function handleUnauthorized(): void {
   if (cur.path !== '/login') void router.replace({ path: '/login', query: { next: cur.fullPath } })
 }
 
+/** CSRF guard: the API refuses unsafe methods without it (a cross-site form cannot set it). */
+const REQUESTED_WITH = { 'X-Requested-With': 'kpi-monitor' }
+
 async function request<T>(url: string, init: RequestInit & { headers: Record<string, string> }): Promise<T> {
   let res: Response
   try {
-    res = await fetch(url, { ...init, headers: { ...authHeader(), ...init.headers } })
+    res = await fetch(url, { ...init, headers: { ...authHeader(), ...REQUESTED_WITH, ...init.headers } })
   } catch {
     throw new ApiError(0, 'Network error — check your connection')
   }

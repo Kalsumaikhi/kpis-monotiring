@@ -10,10 +10,11 @@ from sqlalchemy.dialects.postgresql import distinct_on
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.api.util import iso
+from app.api.util import iso, source_lock
 from app.api.deps import get_session
 from app.api.routes_kpis import attribution_for
 from app.connectors.registry import resolve_connector
+from app.core.pipeline import _supersede_held
 from app.models import Change, DataPoint, Credential, Run, Source, WatchTarget
 
 router = APIRouter()
@@ -168,6 +169,9 @@ def list_sources(access: str | None = None, session: Session = Depends(get_sessi
     ]
 
 
+KEY_CHANGE = "a key change"
+
+
 @router.patch("/sources/{slug}")
 def patch_source(slug: str, body: SourcePatch, session: Session = Depends(get_session)):
     source = _source_or_404(session, slug)
@@ -176,9 +180,7 @@ def patch_source(slug: str, body: SourcePatch, session: Session = Depends(get_se
             CronTrigger.from_crontab(body.cron)
         except Exception:  # noqa: BLE001 - APScheduler raises ValueError or KeyError variants
             raise HTTPException(422, "invalid cron expression") from None
-        source.cron = body.cron
-    if body.enabled is not None:
-        source.enabled = body.enabled
+    rekeys = False
     if "credential_id" in body.model_fields_set:
         if body.credential_id is not None:
             if source.access == "watch":
@@ -188,10 +190,38 @@ def patch_source(slug: str, body: SourcePatch, session: Session = Depends(get_se
                 raise HTTPException(422, "unknown key")
             if key.kind == "login":  # a login is a browser session, never a request header
                 raise HTTPException(422, "a login can only be used by KPIs")
-        source.credential_id = body.credential_id
-    session.commit()
+        rekeys = body.credential_id != source.credential_id
+    if not (rekeys and _supports_keys(session, source)):  # a key it never sends changes nothing
+        _apply_source_patch(source, body)
+        if rekeys:
+            source.credential_id = body.credential_id
+        session.commit()
+    else:
+        # With another key (or none) the source may return other data (a key can unlock
+        # more), so the next fetched run is a silent baseline and a held run diffed with the
+        # old key is dropped. Under the per-source lock, which run_source and approve_run
+        # hold for the whole run: no run can be fetching with the old key and then clear
+        # the flag, and no approval can apply old-key data. 409 while a run holds it.
+        sid = source.id
+        with source_lock(session, sid, "a check is running for this source; try again when it finishes"):
+            session.refresh(source)  # state may have changed while waiting
+            _apply_source_patch(source, body)
+            if body.credential_id != source.credential_id:
+                source.credential_id = body.credential_id
+                source.needs_baseline = True
+                source.needs_baseline_at = func.clock_timestamp()
+                _supersede_held(session, sid, reason=KEY_CHANGE)
+            session.commit()
     return {"slug": source.slug, "enabled": source.enabled, "cron": source.cron,
             "credential_id": source.credential_id}
+
+
+def _apply_source_patch(source: Source, body: SourcePatch) -> None:
+    """The cron and enabled edits; the caller sets the key and commits."""
+    if body.cron is not None:
+        source.cron = body.cron
+    if body.enabled is not None:
+        source.enabled = body.enabled
 
 
 def _has_open_run(session: Session, source_id: int) -> bool:

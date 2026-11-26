@@ -11,6 +11,7 @@ from app.connectors.watch import noisy_target_ids
 from app.connectors.watch.connector import WatchConnector
 from app.core import pipeline
 from app.models import Run, Source, WatchSnapshot, WatchTarget
+from tests.conftest import api_client
 
 
 @pytest.fixture(autouse=True)
@@ -230,7 +231,6 @@ def test_parse_emits_single_incomplete_summary(tmp_path):
 
 @respx.mock
 def test_partial_failure_surfaces_end_to_end(wenv, db_session, monkeypatch):
-    from fastapi.testclient import TestClient
     from app.api import deps
     from app.api.main import create_app
     from app.config import get_settings
@@ -258,7 +258,7 @@ def test_partial_failure_surfaces_end_to_end(wenv, db_session, monkeypatch):
     monkeypatch.setattr(get_settings(), "dashboard_password", "secret")
     app = create_app()
     app.dependency_overrides[deps.get_session] = lambda: db_session
-    c = TestClient(app)
+    c = api_client(app)
     c.auth = ("u", "secret")
     item = [s for s in c.get("/api/sources").json() if s["slug"] == "custom-x"][0]
     assert item["incomplete"] is True

@@ -356,7 +356,13 @@ class WatchConnector:
             with logins.login_lock(self._bind(), cred.id):
                 was = lg.version[0]
                 if self._cas(lg, {"status": "signing_in"}) is None:
-                    lg.skip = True  # changed since we read it: leave it to whoever did
+                    # Changed since we read it. Another source sharing this login may have
+                    # signed in again meanwhile: then use its session (the caller refetches
+                    # once; lg.tried stops any further retry). Else leave it to whoever did.
+                    self._reload(lg)
+                    if not lg.skip and lg.version[0] == "ok":
+                        return True
+                    lg.skip = True
                     return False
                 try:
                     return self._signing_in(lg, state, was)
