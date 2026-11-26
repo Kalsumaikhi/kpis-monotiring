@@ -231,7 +231,8 @@ def test_start_attempt_202_and_409_when_active(client, db_session, monkeypatch):
     r = client.get(f"/api/logins/{c.id}/attempt")
     assert r.status_code == 200
     assert r.json() == {"attempt_id": aid, "status": "pending", "error": None,
-                        "waiting_since": None, "expires_at": None}
+                        "waiting_since": None, "expires_at": None,
+                        "remaining_seconds": None}
     assert client.post("/api/logins/999999/sign-in").status_code == 404
     assert client.get("/api/logins/999999/attempt").status_code == 404
     hdr = Credential(name="Hdr", kind="header", header_name="X-Key",
@@ -293,6 +294,7 @@ def test_attempt_flow_waiting_code_then_success_queues_runs(client, db_session,
     assert w["status"] == "waiting_code" and w["error"] is None
     since = datetime.fromisoformat(w["waiting_since"])
     assert datetime.fromisoformat(w["expires_at"]) - since == timedelta(minutes=10)
+    assert 595 <= w["remaining_seconds"] <= 600  # server-computed
     assert seen["login_waiting"] == "waiting_code"
     a = attempt(db_session, aid)
     assert a.status == "succeeded" and a.code_enc is None and a.finished_at is not None
@@ -302,7 +304,8 @@ def test_attempt_flow_waiting_code_then_success_queues_runs(client, db_session,
     assert {k["value"] for k in state["cookies"]} == {"new1", "r1"}  # verified + rotated
     assert fetch.urls == ["https://portal.example/a"]  # one verification fetch
     assert login_status(client, c.id) == "ok"
-    assert client.get(f"/api/logins/{c.id}/attempt").json()["status"] == "succeeded"
+    done = client.get(f"/api/logins/{c.id}/attempt").json()
+    assert done["status"] == "succeeded" and done["remaining_seconds"] is None
     # One manual run per enabled source with enabled targets of this login, not if busy.
     assert [(r.trigger) for r in queued(db_session, s1)] == ["manual"]
     assert [(r.trigger) for r in queued(db_session, s2)] == ["schedule"]

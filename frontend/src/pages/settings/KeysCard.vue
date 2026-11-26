@@ -145,7 +145,7 @@ async function doDelete() {
           <p v-if="k.last_error" class="error-text small">{{ k.last_error }}</p>
         </div>
         <div class="actions">
-          <button v-if="k.kind === 'login'" type="button" class="btn" :data-test="`signin-${k.id}`" :disabled="unavailable || signInBusy(k)" @click="signingIn = k">Sign in now</button>
+          <button v-if="k.kind === 'login'" type="button" class="btn" :data-test="`signin-${k.id}`" :disabled="unavailable || signInBusy(k) || !k.readable || !k.has_secret" @click="signingIn = k">Sign in now</button>
           <button type="button" class="btn" :class="{ secondary: k.readable }" :data-test="`replace-${k.id}`" :disabled="unavailable" @click="open(k, true)">Replace secret</button>
           <button type="button" class="btn secondary" :data-test="`edit-${k.id}`" @click="open(k)">Edit</button>
           <button type="button" class="btn danger" :data-test="`delete-${k.id}`" @click="askDelete(k)">Delete</button>

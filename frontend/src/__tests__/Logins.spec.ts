@@ -94,6 +94,7 @@ describe('target form with a login key', () => {
     expect(apiSend.mock.calls[0][2].use_browser).toBe(true)
     await w.get('[data-test=key-select]').setValue(1)
     expect(box().disabled).toBe(false)
+    expect(box().checked).toBe(false) // back to what it was before the login forced it
     w.unmount()
   })
 })
@@ -104,6 +105,34 @@ describe('StatusBadge', () => {
     expect(w.text()).toContain('Login needed')
     expect(w.classes()).toContain('tone-warn')
     expect(w.get('[data-icon]').attributes('data-icon-name')).toBe('lock')
+  })
+})
+
+describe('KeysCard sign-in button', () => {
+  it('is disabled when the key has no readable secret', async () => {
+    apiGet.mockResolvedValue([loginKey({ readable: false }), loginKey({ id: 8, has_secret: false })])
+    const w = mount(KeysCard, { attachTo: document.body })
+    await flushPromises()
+    expect((w.get('[data-test=signin-7]').element as HTMLButtonElement).disabled).toBe(true)
+    expect((w.get('[data-test=signin-8]').element as HTMLButtonElement).disabled).toBe(true)
+    w.unmount()
+  })
+
+  it('returns focus to the Sign in now button when the dialog closes', async () => {
+    apiGet.mockImplementation(async (u: string) => (u.includes('attempt') ? at('signing_in') : [loginKey()]))
+    apiSend.mockResolvedValue({ attempt_id: 5, status: 'pending' })
+    const w = mount(KeysCard, { attachTo: document.body })
+    await flushPromises()
+    const btn = w.get('[data-test=signin-7]').element as HTMLButtonElement
+    btn.focus()
+    await w.get('[data-test=signin-7]').trigger('click')
+    await flushPromises()
+    expect(document.activeElement).not.toBe(btn)
+    ;(document.querySelector('[data-test=cancel]') as HTMLButtonElement).click()
+    await flushPromises()
+    expect(document.querySelector('[role=dialog]')).toBeNull()
+    expect(document.activeElement).toBe(btn)
+    w.unmount()
   })
 })
 
@@ -130,7 +159,7 @@ describe('KeysCard login rows', () => {
 })
 
 const at = (status: string, extra: Record<string, unknown> = {}) =>
-  ({ attempt_id: 5, status, error: null, waiting_since: null, expires_at: null, ...extra })
+  ({ attempt_id: 5, status, error: null, waiting_since: null, expires_at: null, remaining_seconds: null, ...extra })
 
 async function openDialog() {
   const w = mount(SignInDialog, { props: { open: true, credentialId: 7, keyName: 'Acme login', host: 'acme.test' }, attachTo: document.body })
@@ -144,10 +173,11 @@ describe('SignInDialog', () => {
     vi.useFakeTimers({ now: new Date('2026-11-26T10:00:00Z') })
     apiSend.mockResolvedValueOnce({ attempt_id: 5, status: 'pending' })
     let current = at('signing_in')
-    apiGet.mockImplementation(async () => current)
+    const serverExp = Date.parse('2026-11-26T10:10:00Z')
+    apiGet.mockImplementation(async () => (current.status === 'waiting_code' ? { ...current, remaining_seconds: Math.max(0, Math.ceil((serverExp - Date.now()) / 1000)) } : current))
     const w = await openDialog()
     expect(txt()).toContain('Signing in to acme.test…')
-    current = at('waiting_code', { waiting_since: '2026-11-26T10:00:00Z', expires_at: '2026-11-26T10:10:00Z' })
+    current = at('waiting_code', { waiting_since: '2026-11-26T10:00:00Z', expires_at: '2026-11-26T10:10:00Z', remaining_seconds: 590 })
     await vi.advanceTimersByTimeAsync(2100)
     expect(txt()).toContain('We sent a code to your email. Enter it within 09:5')
     const input = document.querySelector('input[autocomplete=one-time-code]') as HTMLInputElement
@@ -183,9 +213,13 @@ describe('SignInDialog', () => {
     vi.useFakeTimers({ now: new Date('2026-11-26T10:00:00Z') })
     apiSend.mockResolvedValueOnce({ attempt_id: 5, status: 'pending' })
     // The server never flips: expires_at alone decides.
-    apiGet.mockResolvedValue(at('waiting_code', { waiting_since: '2026-11-26T09:50:02Z', expires_at: '2026-11-26T10:00:02Z' }))
+    const serverExp = Date.parse('2026-11-26T10:00:02Z')
+    apiGet.mockImplementation(async () => at('waiting_code', { expires_at: '2026-11-26T10:00:02Z', remaining_seconds: Math.max(0, Math.ceil((serverExp - Date.now()) / 1000)) }))
     const w = await openDialog()
     await vi.advanceTimersByTimeAsync(2100)
+    const calls = apiGet.mock.calls.length
+    await vi.advanceTimersByTimeAsync(4100)
+    expect(apiGet.mock.calls.length).toBeGreaterThan(calls) // polling goes on: the server status wins
     expect(txt()).toContain('this sign-in expired — click Sign in now again')
     expect(document.querySelector('input[autocomplete=one-time-code]')).toBeNull()
     const retry = Array.from(document.querySelectorAll('button')).find((b) => b.textContent?.includes('Try again'))!
@@ -210,7 +244,7 @@ describe('SignInDialog', () => {
 
   it('code input cleared after submit', async () => {
     apiSend.mockResolvedValueOnce({ attempt_id: 5, status: 'pending' })
-    apiGet.mockResolvedValue(at('waiting_code', { expires_at: new Date(Date.now() + 600_000).toISOString() }))
+    apiGet.mockResolvedValue(at('waiting_code', { expires_at: new Date(Date.now() + 600_000).toISOString(), remaining_seconds: 600 }))
     const w = await openDialog()
     await flushPromises()
     const input = document.querySelector('input[autocomplete=one-time-code]') as HTMLInputElement
@@ -229,7 +263,7 @@ describe('SignInDialog', () => {
 
   it('rejects bad characters before sending', async () => {
     apiSend.mockResolvedValueOnce({ attempt_id: 5, status: 'pending' })
-    apiGet.mockResolvedValue(at('waiting_code', { expires_at: new Date(Date.now() + 600_000).toISOString() }))
+    apiGet.mockResolvedValue(at('waiting_code', { expires_at: new Date(Date.now() + 600_000).toISOString(), remaining_seconds: 600 }))
     const w = await openDialog()
     await flushPromises()
     const input = document.querySelector('input[autocomplete=one-time-code]') as HTMLInputElement
@@ -241,6 +275,69 @@ describe('SignInDialog', () => {
     await flushPromises()
     expect(apiSend).not.toHaveBeenCalled()
     expect(txt()).toContain('the code can only contain letters, digits and dashes')
+    w.unmount()
+  })
+
+  it('a slow start that fails still shows the error and starts no polling', async () => {
+    vi.useFakeTimers({ now: new Date('2026-11-26T10:00:00Z') })
+    let fail!: () => void
+    apiSend.mockImplementationOnce(() => new Promise((_, rej) => { fail = () => rej(new ApiError(503, 'keys unavailable')) }))
+    apiGet.mockResolvedValue(at('failed', { error: 'old attempt' }))
+    const w = await openDialog()
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(apiGet).not.toHaveBeenCalled()
+    fail()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(txt()).toContain('keys unavailable')
+    expect(txt()).not.toContain('old attempt')
+    await vi.advanceTimersByTimeAsync(6000)
+    expect(apiGet).not.toHaveBeenCalled()
+    w.unmount()
+  })
+
+  it('never overlaps polls', async () => {
+    vi.useFakeTimers({ now: new Date('2026-11-26T10:00:00Z') })
+    apiSend.mockResolvedValueOnce({ attempt_id: 5, status: 'pending' })
+    apiGet.mockImplementation(() => new Promise(() => {}))
+    const w = await openDialog()
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(apiGet).toHaveBeenCalledTimes(1)
+    w.unmount()
+  })
+
+  it('a rejected code that returns to waiting_code lets you type again', async () => {
+    vi.useFakeTimers({ now: new Date('2026-11-26T10:00:00Z') })
+    apiSend.mockResolvedValueOnce({ attempt_id: 5, status: 'pending' })
+    let cur = at('waiting_code', { waiting_since: '2026-11-26T10:00:00Z', remaining_seconds: 600 })
+    apiGet.mockImplementation(async () => cur)
+    const w = await openDialog()
+    await vi.advanceTimersByTimeAsync(0)
+    const input = document.querySelector('input[autocomplete=one-time-code]') as HTMLInputElement
+    input.value = '111111'
+    input.dispatchEvent(new Event('input'))
+    await vi.advanceTimersByTimeAsync(0)
+    apiSend.mockResolvedValueOnce({ attempt_id: 5, status: 'waiting_code' })
+    ;(document.querySelector('[data-test=code-submit]') as HTMLButtonElement).click()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(txt()).toContain('Checking the code…')
+    cur = at('waiting_code', { waiting_since: '2026-11-26T10:00:03Z', remaining_seconds: 597 })
+    await vi.advanceTimersByTimeAsync(2100)
+    expect(document.querySelector('input[autocomplete=one-time-code]')).not.toBeNull()
+    w.unmount()
+  })
+
+  it('clicking the backdrop does not cancel while waiting for the code; Escape does', async () => {
+    apiSend.mockResolvedValueOnce({ attempt_id: 5, status: 'pending' })
+    apiGet.mockResolvedValue(at('waiting_code', { remaining_seconds: 600, expires_at: new Date(Date.now() + 600_000).toISOString() }))
+    const w = await openDialog()
+    await flushPromises()
+    ;(document.querySelector('.overlay') as HTMLElement).click()
+    await flushPromises()
+    expect(w.emitted('close')).toBeUndefined()
+    apiSend.mockResolvedValueOnce({})
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    await flushPromises()
+    expect(w.emitted('close')).toHaveLength(1)
     w.unmount()
   })
 
@@ -275,7 +372,7 @@ function src(over: Partial<Source>): Source {
     slug: 's', name: 'S', area: 'Macro', access: 'watch', enabled: true, cron: null,
     last_run: { id: 1, status: 'ok', finished_at: '2026-11-20T10:00:00Z', added: 0, altered: 0, removed: 0 },
     last_change_at: null, rows_tracked: 1, changes_30d: 0, failing_streak: 0, attribution: null, incomplete: false,
-    noisy_targets: 0, last_success_at: null, credential_id: null, credential_name: null, credential_supported: false, ...over,
+    noisy_targets: 0, logins_needed: 0, last_success_at: null, credential_id: null, credential_name: null, credential_supported: false, ...over,
   }
 }
 

@@ -37,7 +37,7 @@ export interface Source {
   attribution: string | null
   incomplete: boolean
   noisy_targets: number
-  logins_needed?: number
+  logins_needed: number
   last_success_at: string | null
   credential_id: number | null
   credential_name: string | null
@@ -220,6 +220,7 @@ export interface LoginAttempt {
   error: string | null
   waiting_since: string | null
   expires_at: string | null
+  remaining_seconds: number | null
 }
 export interface KeyUsedBy {
   targets: { id: number; kpi_name: string; source: string }[]

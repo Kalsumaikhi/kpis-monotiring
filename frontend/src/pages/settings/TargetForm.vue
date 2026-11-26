@@ -19,7 +19,16 @@ const credentialId = ref<number | null>(props.target?.credential_id ?? null)
 const keys = ref<StoredKey[]>([])
 const isLogin = computed(() => keys.value.find((k) => k.id === credentialId.value)?.kind === 'login')
 // A login key always runs in the browser (the server sets this too).
-watch(isLogin, (v) => { if (v) useBrowser.value = true }, { flush: 'sync' })
+let browserBeforeLogin: boolean | null = null
+watch(isLogin, (v) => {
+  if (v) {
+    browserBeforeLogin = useBrowser.value
+    useBrowser.value = true
+  } else if (browserBeforeLogin !== null) {
+    useBrowser.value = browserBeforeLogin // give back what the user had before the login forced it
+    browserBeforeLogin = null
+  }
+}, { flush: 'sync' })
 const saving = ref(false)
 const saveError = ref('')
 const testing = ref(false)

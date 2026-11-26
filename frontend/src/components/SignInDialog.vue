@@ -22,18 +22,22 @@ const cancelling = ref(false)
 const codeError = ref('')
 const code = ref('')
 const codeEl = ref<HTMLInputElement | null>(null)
-const now = ref(Date.now())
+const now = ref(performance.now())
+// Local deadline (monotonic clock) set from the server's remaining_seconds on every poll.
+const deadline = ref<number | null>(null)
 const dialog = ref<HTMLElement | null>(null)
-let seq = 0 // stale poll responses are dropped
+let startSeq = 0 // a superseded start() is dropped
+let pollSeq = 0 // stale poll responses are dropped
+let inflight = 0 // pollSeq of the poll in flight (0 = none): ticks never overlap
 let pollTimer: ReturnType<typeof setInterval> | null = null
 let tickTimer: ReturnType<typeof setInterval> | null = null
 let opener: HTMLElement | null = null
 let doneSent = false
 
 const status = computed(() => attempt.value?.status ?? null)
-const expiresMs = computed(() => (attempt.value?.expires_at ? Date.parse(attempt.value.expires_at) : null))
-// expires_at is authoritative: past it the code step is over even if the server has not flipped yet.
-const remaining = computed(() => (expiresMs.value === null ? null : Math.max(0, Math.ceil((expiresMs.value - now.value) / 1000))))
+// The countdown follows the server's clock (remaining_seconds), not this device's: at 0 the code step
+// is over even if the server has not flipped yet (polling goes on, so the server status wins).
+const remaining = computed(() => (deadline.value === null ? null : Math.max(0, Math.ceil((deadline.value - now.value) / 1000))))
 const clock = computed(() => {
   const r = remaining.value ?? 0
   return `${String(Math.floor(r / 60)).padStart(2, '0')}:${String(r % 60).padStart(2, '0')}`
@@ -71,21 +75,33 @@ function stop() {
 }
 
 async function poll() {
-  const mine = ++seq
+  if (inflight) return
+  const mine = ++pollSeq
+  inflight = mine
   try {
     const a = await apiGet<LoginAttempt>(`/api/logins/${props.credentialId}/attempt`)
-    if (mine !== seq || !props.open) return
+    if (mine !== pollSeq || !props.open) return
     // Never go back to an older attempt than the one being shown.
     if (attempt.value && a.attempt_id < attempt.value.attempt_id) return
     apply(a)
   } catch {
     /* transient: the next tick tries again */
+  } finally {
+    if (inflight === mine) inflight = 0
   }
 }
 
 function apply(a: LoginAttempt) {
-  if (attempt.value && attempt.value.status !== a.status) submitted.value = false
+  const prev = attempt.value
+  // A new code step (rejected code, new waiting_since) or a new error means the code box is open again.
+  if (prev && (prev.status !== a.status || prev.waiting_since !== a.waiting_since || prev.error !== a.error)) submitted.value = false
   attempt.value = a
+  if (a.status === 'waiting_code' && a.remaining_seconds !== null && a.remaining_seconds !== undefined) {
+    now.value = performance.now()
+    deadline.value = now.value + a.remaining_seconds * 1000
+  } else if (a.status !== 'waiting_code') {
+    deadline.value = null
+  }
   if (a.status === 'succeeded' && !doneSent) {
     doneSent = true
     emit('done')
@@ -95,38 +111,44 @@ function apply(a: LoginAttempt) {
 
 function startTimers() {
   stop()
-  now.value = Date.now()
+  now.value = performance.now()
   pollTimer = setInterval(() => { if (!attempt.value || !FINAL.includes(attempt.value.status)) void poll() }, 2000)
-  tickTimer = setInterval(() => { now.value = Date.now() }, 1000)
+  tickTimer = setInterval(() => { now.value = performance.now() }, 1000)
 }
 
 async function start() {
-  const mine = ++seq
+  const mine = ++startSeq
+  pollSeq++ // drop anything still in flight from an earlier attempt
+  inflight = 0
+  stop()
   starting.value = true
   startError.value = ''
   attempt.value = null
+  deadline.value = null
   submitted.value = false
   cancelling.value = false
   codeError.value = ''
   doneSent = false
   clearCode()
-  startTimers()
   try {
     const res = await apiSend<{ attempt_id: number; status: LoginAttempt['status'] }>('POST', `/api/logins/${props.credentialId}/sign-in`)
-    if (mine !== seq) return
-    attempt.value = { attempt_id: res.attempt_id, status: res.status, error: null, waiting_since: null, expires_at: null }
+    if (mine !== startSeq) return
+    attempt.value = { attempt_id: res.attempt_id, status: res.status, error: null, waiting_since: null, expires_at: null, remaining_seconds: null }
+    startTimers()
     void poll()
   } catch (e) {
-    if (mine !== seq) return
+    if (mine !== startSeq) return
     if (e instanceof ApiError && e.status === 409) {
       await poll() // one is already running: follow it
-      if (!attempt.value) startError.value = e.detail
+      if (mine !== startSeq) return
+      if (attempt.value) startTimers()
+      else startError.value = e.detail
     } else {
       startError.value = e instanceof ApiError ? e.detail : 'Could not start the sign-in'
       stop()
     }
   } finally {
-    starting.value = false
+    if (mine === startSeq) starting.value = false
   }
 }
 
@@ -146,7 +168,7 @@ async function submitCode() {
   } catch (e) {
     submitted.value = false
     if (e instanceof ApiError && e.status === 410) {
-      attempt.value = { ...attempt.value, status: 'expired', error: e.detail }
+      attempt.value = { ...attempt.value!, status: 'expired', error: e.detail }
       stop()
     } else {
       codeError.value = e instanceof ApiError ? e.detail : 'Could not send the code'
@@ -202,6 +224,20 @@ function onKey(e: KeyboardEvent) {
   }
 }
 
+function teardown() {
+  startSeq++
+  pollSeq++
+  inflight = 0
+  stop()
+  clearCode()
+  document.removeEventListener('keydown', onKey, true)
+  if (opener !== null || props.open) {
+    const target = opener && opener.isConnected ? opener : document.querySelector<HTMLElement>('main')
+    target?.focus()
+  }
+  opener = null
+}
+
 watch(
   () => props.open,
   async (o) => {
@@ -212,13 +248,7 @@ watch(
       await nextTick()
       dialog.value?.querySelector<HTMLElement>('[data-test=cancel]')?.focus()
     } else {
-      seq++
-      stop()
-      clearCode()
-      document.removeEventListener('keydown', onKey, true)
-      const target = opener && opener.isConnected ? opener : document.querySelector<HTMLElement>('main')
-      target?.focus()
-      opener = null
+      teardown()
     }
   },
   { immediate: true },
@@ -229,17 +259,19 @@ watch(view, async (v) => {
   await nextTick()
   codeEl.value?.focus()
 })
-onBeforeUnmount(() => {
-  seq++
-  stop()
-  clearCode()
-  document.removeEventListener('keydown', onKey, true)
-})
+// A parent that removes the dialog with v-if never flips `open`, so restore focus here too.
+onBeforeUnmount(teardown)
+
+// A click outside must not throw away a code step the user is in the middle of.
+function onBackdrop() {
+  if (status.value === 'waiting_code') return
+  void cancel()
+}
 </script>
 
 <template>
   <Teleport to="body">
-    <div v-if="open" class="overlay" @click.self="cancel">
+    <div v-if="open" class="overlay" @click.self="onBackdrop">
       <div ref="dialog" class="dialog" role="dialog" aria-modal="true" aria-labelledby="si-title" aria-describedby="si-body">
         <h2 id="si-title">Sign in to {{ keyName }}</h2>
         <div id="si-body" class="body" aria-live="polite">
