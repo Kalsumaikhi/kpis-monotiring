@@ -138,7 +138,7 @@ Additional environment variables:
 
 ## Keys
 
-A key lets a KPI link read pages or APIs that need a login or an API token. Keys live in Settings → Keys; a KPI (or a built-in source that supports it) then picks one from its "Key" list. Four types: a header (for example `Authorization: Bearer ...` or `X-Api-Key`), a link parameter (`?api_key=...`), username and password (HTTP Basic), and a browser login (a site's own sign-in page; see Logins below).
+A key lets a KPI link read pages or APIs that need a login or an API token. Keys live in Settings → Keys; a KPI (or a built-in source that supports it) then picks one from its "Key" list. Built-in sources can't use a browser login: it is only offered to KPIs. Four types: a header (for example `Authorization: Bearer ...` or `X-Api-Key`), a link parameter (`?api_key=...`), username and password (HTTP Basic), and a browser login (a site's own sign-in page; see Logins below).
 
 **Set `KPI_SECRET_KEY` first.** Secrets are stored encrypted with it. Without it, Settings → Keys shows a setup note, saving a key returns 503, and any fetch that needs a key fails with `key unavailable (KPI_SECRET_KEY not set)`. Generate one and put it in `.env`:
 
@@ -170,7 +170,7 @@ Some sites only show their numbers after you sign in on their own sign-in page, 
   - **Selectors**: if the monitor can't find the sign-in boxes by itself, tell it where the username box, password box, submit button and email code box are (CSS selectors, for example `#email`).
   - **Also used on**: other site names this login covers, separated by commas or spaces (for example `app.example.com, data.example.com`). Use it when you sign in on one site name but the numbers live on another.
 
-Then add a KPI as usual and pick the login in its "Key" list. The KPI's link must be on the login page's site, or on a site listed under "Also used on"; otherwise saving is refused with a message that tells you to add it there. KPIs with a login always use the built-in browser, so "Needs a browser" is ticked for you.
+Then add a KPI as usual and pick the login in its "Key" list. The KPI's link must be on the login page's site, or on a site listed under "Also used on"; otherwise saving is refused with a message that tells you to add it there. KPIs with a login always use the built-in browser, so "Needs a browser" is ticked for you. A login can only be used by KPIs, not by built-in sources (Settings doesn't offer it there, and the server refuses it).
 
 **How it works.**
 
@@ -181,15 +181,15 @@ Then add a KPI as usual and pick the login in its "Key" list. The KPI's link mus
 **When the site emails you a code.** The monitor never reads your email. Instead:
 
 1. It stops and marks the KPIs "Login needed". They count as "not checked", so nothing is removed and no false "page changed" alert is sent.
-2. You get **one** Mattermost message: "*source* — *login* needs you to sign in", with a link to the dashboard. You won't get one per KPI or per run.
+2. You get **one** Mattermost message: "*source* — *login* needs you to sign in", with a link to the dashboard. You won't get one per KPI or per run. KPIs waiting for a sign-in don't make the check fail: even when every KPI of a source is waiting, there is no "check failed" or "failed N times in a row" message, and no separate "incomplete fetch" line for them.
 3. Open the link (or Settings → Keys) and click **Sign in now** on the login. The Overview page also shows a "Sign-in needed" flag on the affected source.
-4. The monitor signs in again and the site sends you a new code. The dialog says "Enter the code sent to your email" and counts down from **10 minutes**.
+4. The monitor signs in again and the site sends you a new code. The dialog says "We sent a code to your email. Enter it within 10:00" and counts down from **10 minutes**.
 5. Type the code and click Submit. On success the dialog says "Signed in. Checking your KPIs now", and the KPIs that were waiting are checked straight away.
 6. If the code is wrong or too late, or something else goes wrong, the dialog says what happened. Click "Try again" (or "Sign in now") to start over. Only one sign-in per login can run at a time.
 
 Until you sign in, the monitor does not keep trying by itself, so the site doesn't keep emailing you codes or lock your account.
 
-**Status labels.** Each login in Settings → Keys shows one of: "Signed in", "Login needed", "Signing in…" or "Sign-in failed" (with the reason).
+**Status labels.** Each login in Settings → Keys shows one of: "Signed in", "Login needed" or "Signing in…". When a sign-in didn't work, the login shows "Login needed" with the reason (for example "code was not accepted").
 
 **What isn't supported.**
 
@@ -199,6 +199,8 @@ Until you sign in, the monitor does not keep trying by itself, so the site doesn
 - Sign-in pages that aren't `https://`.
 
 **Safety.** The password and codes are never shown, logged, or saved in plain text. They are kept out of run errors, raw files, page snapshots and Mattermost. A code is kept (encrypted) only until it has been typed in, then wiped. The password is only ever typed into the saved login page's site (or an "Also used on" site), and the saved session is only used for those sites. The login site's own page scripts are trusted, as in any browser you sign in with.
+
+**robots.txt.** The KPI pages behind a login are checked against the site's robots.txt as usual, but the sign-in page itself is not: sites often disallow `/login` for crawlers, and signing in is something you asked the monitor to do on your behalf.
 
 ## Attribution
 

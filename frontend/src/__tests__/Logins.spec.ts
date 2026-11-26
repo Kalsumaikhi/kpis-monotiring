@@ -143,7 +143,9 @@ describe('KeysCard login rows', () => {
     const w = mount(KeysCard, { attachTo: document.body })
     await flushPromises()
     expect(w.get('[data-test=key-7]').text()).toContain('Login needed')
-    expect(w.get('[data-test=key-8]').text()).toContain('Sign-in failed')
+    // 'failed' is never written for a login (a failed sign-in leaves it login_needed); shown as such.
+    expect(w.get('[data-test=key-8]').text()).toContain('Login needed')
+    expect(w.get('[data-test=key-8]').text()).not.toContain('Sign-in failed')
     expect(w.get('[data-test=key-8]').text()).toContain('wrong password')
     expect(w.get('[data-test=key-9]').text()).toContain('Signed in')
     expect(w.get('[data-test=key-10]').text()).toContain('Signing in…')

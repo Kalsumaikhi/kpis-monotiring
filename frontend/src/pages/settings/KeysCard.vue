@@ -25,7 +25,6 @@ const LOGIN_BADGE: Record<string, { label: string; tone: string }> = {
   login_needed: { label: 'Login needed', tone: 'warn' },
   signing_in: { label: 'Signing in…', tone: 'muted' },
   waiting_code: { label: 'Signing in…', tone: 'muted' },
-  failed: { label: 'Sign-in failed', tone: 'fail' },
 }
 const loginBadge = (k: StoredKey) => LOGIN_BADGE[k.login_status ?? 'login_needed'] ?? LOGIN_BADGE.login_needed
 const signInBusy = (k: StoredKey) => k.login_status === 'signing_in' || k.login_status === 'waiting_code'
