@@ -272,6 +272,37 @@ Usage rules (from contrast checks, WCAG AA 4.5:1 for text):
   - Keys are not supported with "Needs a browser" (422 with an explanation) in this version.
 - **Out of scope:** OAuth/expiring tokens, browser logins for paid downloads.
 
+### 5.11 Browser logins with manual email codes (added 2026-11-26, approved)
+
+**Why:** some of the user's sources need a browser login: username and password, sometimes followed by a one-time code sent by email. The user chose to enter codes manually; nothing reads mailboxes.
+
+- **Login keys.** A new key type, `login`, in Settings → Keys, with these fields:
+  - login page URL (https only);
+  - username;
+  - password (encrypted, write-only);
+  - optional Advanced fields:
+    - CSS selectors for the username box, password box, submit button and code box;
+    - "Also used on" extra hosts.
+
+  KPIs pick a login like any key. A KPI with a login is always fetched in browser mode. Its link must be on the login page's host or on an "Also used on" host.
+- **Sessions.** After a successful sign-in, the browser session (cookies and storage) is saved encrypted per login. It is loaded only for fetches whose host is allowed for that login, through the existing destination-policy proxy.
+- **Scheduled checks.**
+  - **Valid session:** the page is checked normally.
+  - **Expired session:** a login form (a visible password box) appears, or the browser is sent to the login page. The tool then signs in automatically with the username and password.
+  - **Code requested:** if the site asks for a one-time code, the tool stops at once. The affected KPIs get status `login_needed`, which counts as incomplete, so no data is removed. Exactly **one** Mattermost message is sent per transition into "login needed": `**{source}** — {login name} needs you to sign in. Open the dashboard to enter the email code.` and a link.
+- **Signing in with a code.**
+  - "Sign in now" on the dashboard starts an attempt. The worker opens the browser, fills in the username and password and submits.
+  - If a code box appears, the attempt waits up to **10 minutes** while the dashboard shows "Enter the code sent to your email".
+  - The user submits the code. It is held encrypted only until it is typed in, then wiped.
+  - On success, the session is saved, the KPIs that need it are queued for an immediate check, and the status returns to ok.
+  - On a wrong code, timeout or failure, the attempt ends with a clear message, and "Sign in now" can be used again.
+  - One attempt per login at a time.
+- **Safety.**
+  - Passwords, codes and sessions are never shown, logged or stored in plain text. They are kept out of run errors, raw files, snapshots and Mattermost.
+  - Logins only happen on the saved https login page.
+  - Session cookies are only ever used for allowed hosts.
+- **Out of scope:** reading codes from email or SMS automatically, CAPTCHAs, and single sign-on through third-party identity providers.
+
 ## 6. Constraints
 
 - Data volume: millions of data points (WDI alone ≈ 1,400 indicators × 217 economies × 60+ years). Bulk inserts/upserts and set-based diffing in Postgres (e.g. load into a staging table and diff with SQL) rather than row-by-row Python.
