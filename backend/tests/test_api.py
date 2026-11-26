@@ -180,6 +180,51 @@ def test_runs_has_changes_filter(client, db_session, source):
     assert client.get("/api/runs?has_changes=false").json()["total"] == 3
 
 
+def _mixed_runs(db_session):
+    eco = Source(slug="eco", name="Eco", area="economic", access="api")
+    mil = Source(slug="mil", name="Mil", area="military", access="file")
+    db_session.add_all([eco, mil])
+    db_session.flush()
+    db_session.add_all([
+        Run(source_id=eco.id, status="ok", added=1),
+        Run(source_id=eco.id, status="ok", altered=2),
+        Run(source_id=mil.id, status="ok", removed=3),
+        Run(source_id=mil.id, status="ok", added=1, altered=1),
+    ])
+    db_session.commit()
+
+
+def test_runs_filter_area(client, db_session):
+    _mixed_runs(db_session)
+    r = client.get("/api/runs?area=military").json()
+    assert r["total"] == 2 and {i["source"] for i in r["items"]} == {"mil"}
+    assert client.get("/api/runs?area=economic").json()["total"] == 2
+    assert client.get("/api/runs?area=custom").json()["total"] == 0
+    assert client.get("/api/runs").json()["total"] == 4
+
+
+def test_runs_filter_change_type(client, db_session):
+    _mixed_runs(db_session)
+    added = client.get("/api/runs?change=added").json()
+    assert added["total"] == 2 and all(i["added"] > 0 for i in added["items"])
+    assert client.get("/api/runs?change=altered").json()["total"] == 2
+    removed = client.get("/api/runs?change=removed").json()
+    assert removed["total"] == 1 and removed["items"][0]["removed"] == 3
+    both = client.get("/api/runs?change=altered&area=military").json()
+    assert both["total"] == 1
+
+
+def test_runs_filter_unknown_area_422(client, db_session):
+    _mixed_runs(db_session)
+    assert client.get("/api/runs?area=xyz").status_code == 422
+    assert client.get("/api/runs?area=").status_code == 422
+
+
+def test_runs_filter_unknown_change_422(client, db_session):
+    _mixed_runs(db_session)
+    assert client.get("/api/runs?change=foo").status_code == 422
+
+
 def _run_with_changes(db_session, source):
     run = Run(source_id=source.id, status="ok")
     db_session.add(run)
