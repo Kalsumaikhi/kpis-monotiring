@@ -392,3 +392,42 @@ def test_no_open_transaction_during_download(env, db_session, monkeypatch):
     run = pipeline.run_source(sf, "fake")
     assert run.status == "baseline", run.error
     assert during == [False]
+
+
+LOGIN_PW = "login-password-123"
+
+
+def mk_login(db_session):
+    return mk_cred(db_session, name="Portal", kind="login", secret=LOGIN_PW,
+                   username="me@example.com", login_url="https://api.example.com/login")
+
+
+def test_patch_source_refuses_login_key(env, db_session, client):
+    cred = mk_login(db_session)
+    r = client.patch("/api/sources/fake", json={"credential_id": cred.id})
+    assert r.status_code == 422
+    assert r.json()["detail"] == "a login can only be used by KPIs"
+    db_session.refresh(env[0])
+    assert env[0].credential_id is None
+
+
+@respx.mock
+def test_pipeline_refuses_login_key_on_source(env, db_session):
+    """Defence in depth: a login key already attached to a built-in source (older data, a
+    direct DB edit) fails the run and never sends the password."""
+    src, conn, sf = env
+    cred = mk_login(db_session)
+    src.credential_id = cred.id
+    db_session.flush()
+    route = respx.get("https://api.example.com/data").mock(return_value=httpx.Response(200))
+    run = pipeline.run_source(sf, "fake")
+    assert run.status == "failed"
+    assert run.error == "login keys are only used by KPIs"
+    assert not route.called
+
+
+def test_apply_refuses_login_key():
+    cred = creds.Credential(1, "Portal", "login", None, None, None, "me", LOGIN_PW,
+                            login_url="https://x.example.com/l")
+    with pytest.raises(ValueError):
+        creds.apply(cred, "https://x.example.com/data", {})

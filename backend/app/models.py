@@ -236,6 +236,46 @@ class Credential(Base):
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_error: Mapped[str | None] = mapped_column(Text)
+    login_url: Mapped[str | None] = mapped_column(Text)
+    selectors: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    extra_hosts: Mapped[list[str] | None] = mapped_column(JSONB)
+
+
+class LoginSession(Base):
+    """Saved browser session (Playwright storage_state, Fernet-encrypted) of a login key."""
+    __tablename__ = "login_sessions"
+    credential_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("credentials.id", ondelete="CASCADE"), primary_key=True)
+    state_enc: Mapped[bytes | None] = mapped_column(LargeBinary)
+    # 'ok' | 'login_needed' | 'signing_in' | 'waiting_code' | 'failed'
+    status: Mapped[str] = mapped_column(Text, server_default="login_needed")
+    last_error: Mapped[str | None] = mapped_column(Text)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+ACTIVE_ATTEMPT_STATUSES = ("pending", "signing_in", "waiting_code", "verifying")
+
+
+class LoginAttempt(Base):
+    """One sign-in attempt; at most one active per login (partial unique index)."""
+    __tablename__ = "login_attempts"
+    id: Mapped[int] = _id()
+    credential_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("credentials.id", ondelete="CASCADE"))
+    # pending|signing_in|waiting_code|verifying|succeeded|failed|expired|cancelled
+    status: Mapped[str] = mapped_column(Text)
+    code_enc: Mapped[bytes | None] = mapped_column(LargeBinary)
+    error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = _now()
+    waiting_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 Index("uq_credentials_name_lower", func.lower(Credential.name), unique=True)
+Index("ix_login_attempts_credential_id", LoginAttempt.credential_id)
+Index(
+    "uq_login_attempts_active", LoginAttempt.credential_id, unique=True,
+    postgresql_where=LoginAttempt.status.in_(ACTIVE_ATTEMPT_STATUSES),
+)

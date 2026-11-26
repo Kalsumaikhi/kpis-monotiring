@@ -1,4 +1,5 @@
-"""Scheduler worker: cron jobs per source, queued-run poller, job reloader."""
+"""Scheduler worker: cron jobs per source, queued-run poller, job reloader, and interactive
+sign-in attempts (app.login_attempts)."""
 
 from __future__ import annotations
 
@@ -11,6 +12,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from sqlalchemy import select, update
 
+from app import login_attempts
 from app.connectors.registry import resolve_connector, sync_sources
 from app.core.pipeline import (
     Notifier, RunNotQueuedError, SessionFactory, SourceBusyError, _acquire_source_lock,
@@ -177,12 +179,20 @@ def sweep_stale_runs(session_factory: SessionFactory) -> int:
         session.close()
 
 
-def build_scheduler(session_factory: SessionFactory, notifier: Notifier | None) -> BackgroundScheduler:
+def build_scheduler(session_factory: SessionFactory, notifier: Notifier | None,
+                    attempts: login_attempts.AttemptWorker | None = None) -> BackgroundScheduler:
     scheduler = BackgroundScheduler(
         timezone="UTC",
         job_defaults={"misfire_grace_time": 3600, "coalesce": True, "max_instances": 1},
     )
     reload_jobs(scheduler, session_factory, notifier)
+    attempts = attempts or login_attempts.AttemptWorker(session_factory)
+    # Its own short interval: someone is waiting in the dashboard. Each attempt runs in its
+    # own thread (at most 2), so this job returns at once.
+    scheduler.add_job(
+        attempts.poll, "interval", seconds=login_attempts.POLL_SECONDS,
+        id="poll-sign-ins", max_instances=1, coalesce=True, misfire_grace_time=30,
+    )
     scheduler.add_job(
         poll_queued_once, "interval", seconds=POLL_SECONDS, args=[session_factory, notifier],
         id="poll-queued", max_instances=1, coalesce=True,
@@ -206,6 +216,9 @@ def main() -> None:
     swept = sweep_stale_runs(SessionLocal)
     if swept:
         log.warning("marked %d stale running run(s) as failed", swept)
+    swept = login_attempts.sweep_stale_attempts(SessionLocal)
+    if swept:
+        log.warning("marked %d stale sign-in attempt(s) as failed", swept)
     scheduler = build_scheduler(SessionLocal, notifier_from_settings())
     stop = threading.Event()
     for sig in (signal.SIGTERM, signal.SIGINT):

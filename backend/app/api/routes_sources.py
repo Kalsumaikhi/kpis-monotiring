@@ -14,7 +14,7 @@ from app.api.util import iso
 from app.api.deps import get_session
 from app.api.routes_kpis import attribution_for
 from app.connectors.registry import resolve_connector
-from app.models import Change, DataPoint, Credential, Run, Source
+from app.models import Change, DataPoint, Credential, Run, Source, WatchTarget
 
 router = APIRouter()
 
@@ -34,7 +34,7 @@ def _source_or_404(session: Session, slug: str) -> Source:
 
 def _serialise(source: Source, last_run: Run | None, last_change_at, rows_tracked, changes_30d, streak,
                incomplete=False, noisy_targets=0, last_success_at=None,
-               credential_name=None, credential_supported=False):
+               credential_name=None, credential_supported=False, logins_needed=0):
     return {
         "slug": source.slug,
         "name": source.name,
@@ -61,6 +61,7 @@ def _serialise(source: Source, last_run: Run | None, last_change_at, rows_tracke
         "credential_id": source.credential_id,
         "credential_name": credential_name,
         "credential_supported": credential_supported,
+        "logins_needed": logins_needed,
     }
 
 
@@ -152,12 +153,16 @@ def list_sources(access: str | None = None, session: Session = Depends(get_sessi
     incomplete = _incomplete_ids(session)
     noisy = _noisy_counts(session)
     cred_names = dict(session.execute(select(Credential.id, Credential.name)).all())
+    logins_needed = dict(session.execute(
+        select(WatchTarget.source_id, func.count()).where(
+            WatchTarget.enabled.is_(True), WatchTarget.last_status == "login_needed")
+        .group_by(WatchTarget.source_id)).all())
     return [
         _serialise(
             s, last_runs.get(s.id), change_stats.get(s.id, (None, 0))[0],
             rows.get(s.id, 0), change_stats.get(s.id, (None, 0))[1], streaks.get(s.id, 0),
             s.id in incomplete, noisy.get(s.id, 0), last_success.get(s.id),
-            cred_names.get(s.credential_id), _supports_keys(session, s),
+            cred_names.get(s.credential_id), _supports_keys(session, s), logins_needed.get(s.id, 0),
         )
         for s in sources
     ]
@@ -178,8 +183,11 @@ def patch_source(slug: str, body: SourcePatch, session: Session = Depends(get_se
         if body.credential_id is not None:
             if source.access == "watch":
                 raise HTTPException(422, "this source doesn't use keys")
-            if session.get(Credential, body.credential_id) is None:
+            key = session.get(Credential, body.credential_id)
+            if key is None:
                 raise HTTPException(422, "unknown key")
+            if key.kind == "login":  # a login is a browser session, never a request header
+                raise HTTPException(422, "a login can only be used by KPIs")
         source.credential_id = body.credential_id
     session.commit()
     return {"slug": source.slug, "enabled": source.enabled, "cron": source.cron,

@@ -1,7 +1,7 @@
 """Mattermost incoming-webhook notifications for run outcomes.
 
 One message per run, except `no_change`, `rejected` and `superseded`, which are
-silent. A missing webhook URL disables sending without raising.
+silent unless a login moved into "login needed" during the run. A missing webhook URL disables sending without raising.
 """
 
 from __future__ import annotations
@@ -40,18 +40,34 @@ def format_run_message(
 
     extras (built by the pipeline): page_kpis (names of changed page KPIs), excerpt
     ({added, removed} of the first one), api_counts ((added, altered, removed) of the
-    non-page rows) and incomplete_note (set only when the run became incomplete).
+    non-page rows), incomplete_note (set only when the run became incomplete) and
+    login_needed ([{login_name, source}] of logins that now need a sign-in; one message
+    line each, for every run status).
     """
     text = _base_message(
         run, source, top_indicators, streak, dashboard_base_url, consecutive_failure_alert,
         extras or {},
     )
+    blocks = [text] if text is not None else []
     note = (extras or {}).get("incomplete_note")
     if note and run.status in ("ok", "no_change", "baseline"):
-        warning = (f":warning: **{source.name}** — incomplete fetch: "
-                   f"{_no_mentions(note[:_MAX_ERROR_CHARS])}")
-        return warning if text is None else f"{text}\n\n{warning}"
-    return text
+        blocks.append(f":warning: **{source.name}** — incomplete fetch: "
+                      f"{_no_mentions(note[:_MAX_ERROR_CHARS])}")
+    # Logins that moved into login_needed during this run: whatever the run's status.
+    base = get_settings().dashboard_base_url if dashboard_base_url is None else dashboard_base_url
+    seen: set[str] = set()
+    for item in (extras or {}).get("login_needed") or []:
+        if item["login_name"] in seen:
+            continue
+        seen.add(item["login_name"])
+        blocks.append(_login_needed_block(item["source"], item["login_name"], base))
+    return "\n\n".join(blocks) if blocks else None
+
+
+def _login_needed_block(source_name: str, login_name: str, base_url: str) -> str:
+    return (f"**{_no_mentions(source_name)}** — {_no_mentions(login_name)} needs you to sign in. "
+            "Open the dashboard to enter the email code.\n"
+            f"[Sign in]({base_url.rstrip('/')}/settings#logins)")
 
 
 def _ok_block(name: str, added: int, altered: int, removed: int, vintage: str | None,

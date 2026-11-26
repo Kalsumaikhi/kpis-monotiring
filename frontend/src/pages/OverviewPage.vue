@@ -19,7 +19,7 @@ const fmt = (n: number) => nf.format(n)
 function needsAttention(s: Source): boolean {
   const st = s.last_run?.status
   return st === 'failed' || st === 'suspect_pending' || st === 'approve_queued' ||
-    s.failing_streak > 0 || s.incomplete || s.noisy_targets > 0
+    s.failing_streak > 0 || s.incomplete || s.noisy_targets > 0 || s.logins_needed > 0
 }
 
 const sorted = computed(() => {
@@ -113,9 +113,12 @@ onMounted(load)
             <StatusBadge v-else status="never" />
           </header>
 
-          <div v-if="s.incomplete || s.noisy_targets > 0 || s.failing_streak > 0" class="flags">
+          <div v-if="s.incomplete || s.noisy_targets > 0 || s.failing_streak > 0 || s.logins_needed > 0" class="flags">
             <span v-if="s.failing_streak > 0" class="flag fail">Failing {{ s.failing_streak }}× in a row</span>
             <span v-if="s.incomplete" class="flag warn">Incomplete fetch</span>
+            <RouterLink v-if="s.logins_needed > 0" class="flag warn" to="/settings#logins" data-test="signin-needed">
+              Sign-in needed<template v-if="s.logins_needed > 1"> ({{ s.logins_needed }} pages)</template>
+            </RouterLink>
             <RouterLink v-if="s.noisy_targets > 0" class="flag warn" to="/settings">
               {{ s.noisy_targets }} noisy {{ s.noisy_targets === 1 ? 'page' : 'pages' }}
             </RouterLink>

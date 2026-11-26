@@ -37,6 +37,7 @@ export interface Source {
   attribution: string | null
   incomplete: boolean
   noisy_targets: number
+  logins_needed: number
   last_success_at: string | null
   credential_id: number | null
   credential_name: string | null
@@ -144,7 +145,7 @@ export interface UploadResult { run_id: number }
 // Custom (watch) sources
 export type WatchKind = 'auto' | 'page' | 'api'
 // watch_targets.last_status: 'never' until checked, then the last fetch outcome
-export type WatchStatus = 'ok' | 'blocked' | 'error' | 'never' | 'key_rejected'
+export type WatchStatus = 'ok' | 'blocked' | 'error' | 'never' | 'key_rejected' | 'login_needed'
 export interface WatchTarget {
   id: number
   kpi_name: string
@@ -209,7 +210,18 @@ export interface ImportPreview { token: string; rows: ImportRow[] }
 export interface ImportConfirmResult { created_sources: number; created_targets: number; skipped: number }
 
 // Stored keys: GET/POST/PATCH/DELETE /api/credentials. The secret is write-only and never returned.
-export type KeyKind = 'header' | 'query' | 'basic'
+export type KeyKind = 'header' | 'query' | 'basic' | 'login'
+export type LoginStatus = 'ok' | 'login_needed' | 'signing_in' | 'waiting_code' | 'failed'
+export interface LoginSelectors { username?: string; password?: string; submit?: string; code?: string }
+export type AttemptStatus = 'pending' | 'signing_in' | 'waiting_code' | 'verifying' | 'succeeded' | 'failed' | 'expired' | 'cancelled'
+export interface LoginAttempt {
+  attempt_id: number
+  status: AttemptStatus
+  error: string | null
+  waiting_since: string | null
+  expires_at: string | null
+  remaining_seconds: number | null
+}
 export interface KeyUsedBy {
   targets: { id: number; kpi_name: string; source: string }[]
   sources: string[]
@@ -228,6 +240,11 @@ export interface StoredKey {
   updated_at: string | null
   last_used_at: string | null
   last_error: string | null
+  login_url?: string | null
+  selectors?: LoginSelectors | null
+  extra_hosts?: string[] | null
+  login_status?: LoginStatus
+  login_error?: string | null
   used_by: KeyUsedBy
 }
 export interface KeyIn {
@@ -237,6 +254,9 @@ export interface KeyIn {
   prefix?: string | null
   param_name?: string | null
   username?: string | null
+  login_url?: string | null
+  selectors?: LoginSelectors | null
+  extra_hosts?: string[] | null
   secret: string
 }
 export type KeyPatch = Partial<KeyIn>

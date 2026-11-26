@@ -3,26 +3,34 @@
 from __future__ import annotations
 
 import re
-from typing import Literal
+from typing import Any, Literal
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app import credentials as creds
 from app.api.deps import get_session
 from app.api.util import iso
-from app.models import Credential, Source, WatchTarget
+from app.models import ACTIVE_ATTEMPT_STATUSES, Credential, LoginAttempt, LoginSession, Source, WatchTarget
 
 router = APIRouter()
 
-KeyKind = Literal["header", "query", "basic"]
+KeyKind = Literal["header", "query", "basic", "login"]
 NO_KEY = "KPI_SECRET_KEY is not set — see README → Keys"
-KIND_FIELDS = {"header": ("header_name", "prefix"), "query": ("param_name",), "basic": ("username",)}
-ALL_FIELDS = ("header_name", "prefix", "param_name", "username")
+KIND_FIELDS = {
+    "header": ("header_name", "prefix"), "query": ("param_name",), "basic": ("username",),
+    "login": ("login_url", "username", "selectors", "extra_hosts"),
+}
+ALL_FIELDS = ("header_name", "prefix", "param_name", "username", "login_url", "selectors", "extra_hosts")
+SELECTOR_NAMES = ("username", "password", "submit", "code")
+MAX_EXTRA_HOSTS = 10
+HOSTNAME = re.compile(
+    r"^(?=.{1,253}$)[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$")
 TOKEN = re.compile(r"^[A-Za-z0-9!#$%&'*+.^_`|~-]{1,64}$")
 HEADER_SAFE = re.compile(r"^[\x20-\x7e]*$")  # printable ASCII: no CR/LF, no non-ASCII
 MIN_SECRET = 8
@@ -36,6 +44,9 @@ class CredentialIn(BaseModel):
     prefix: str | None = None
     param_name: str | None = None
     username: str | None = None
+    login_url: str | None = None
+    selectors: dict[str, Any] | None = None
+    extra_hosts: list[Any] | None = None
     secret: str
 
 
@@ -46,12 +57,50 @@ class CredentialPatch(BaseModel):
     prefix: str | None = None
     param_name: str | None = None
     username: str | None = None
+    login_url: str | None = None
+    selectors: dict[str, Any] | None = None
+    extra_hosts: list[Any] | None = None
     secret: str | None = None
 
 
-def _clean(v: str | None) -> str | None:
-    v = (v or "").strip()
+def _clean(v):
+    if isinstance(v, str):
+        v = v.strip()
     return v or None
+
+
+def _check_login(fields: dict) -> None:
+    url = fields["login_url"]
+    try:
+        parts = urlsplit(url) if isinstance(url, str) else None
+        ok = (parts is not None and parts.scheme.lower() == "https" and bool(parts.hostname)
+              and len(url) <= 2048 and not re.search(r"[\x00-\x20\x7f]", url)
+              and "@" not in parts.netloc)
+        parts and parts.port  # raises ValueError on a bad port
+    except ValueError:
+        ok = False
+    if not ok:
+        raise HTTPException(422, "login page must be https")
+    if not fields["username"]:
+        raise HTTPException(422, "username is required")
+    sel = fields["selectors"]
+    if sel is not None:
+        for name, v in sel.items():
+            if (name not in SELECTOR_NAMES or not isinstance(v, str) or not v.strip()
+                    or len(v) > 200 or re.search(r"[\r\n\x00]", v)):
+                raise HTTPException(422, f"invalid selector: {name}")
+        fields["selectors"] = {k: v.strip() for k, v in sel.items()} or None
+    hosts = fields["extra_hosts"]
+    if hosts is not None:
+        if len(hosts) > MAX_EXTRA_HOSTS:
+            raise HTTPException(422, f"at most {MAX_EXTRA_HOSTS} extra hosts")
+        norm = []
+        for h in hosts:
+            n = h.strip().lower() if isinstance(h, str) else h
+            if not isinstance(n, str) or not HOSTNAME.fullmatch(n):
+                raise HTTPException(422, f"invalid host: {h}")
+            norm.append(n)
+        fields["extra_hosts"] = list(dict.fromkeys(norm)) or None
 
 
 def _validate(name: str | None, kind: str, fields: dict, secret: str | None) -> dict:
@@ -69,12 +118,14 @@ def _validate(name: str | None, kind: str, fields: dict, secret: str | None) -> 
             raise HTTPException(422, f"{k} must be 1-64 letters, digits or token characters")
     if kind == "basic" and not fields["username"]:
         raise HTTPException(422, "username is required for a basic key")
+    if kind == "login":
+        _check_login(fields)
     prefix, user = fields["prefix"], fields["username"]
     if prefix and (len(prefix) > 32 or re.search(r"[\r\n]", prefix)):
         raise HTTPException(422, "prefix must be at most 32 characters, no line breaks")
     if kind == "header" and prefix and not HEADER_SAFE.match(prefix):
         raise HTTPException(422, NOT_ASCII)
-    if user and (":" in user or len(user) > 256):
+    if user and ((kind == "basic" and ":" in user) or len(user) > 256):
         raise HTTPException(422, "username must be at most 256 characters and not contain ':'")
     if secret is not None:
         if len(secret) < MIN_SECRET:
@@ -124,15 +175,27 @@ def _readable(row: Credential, fernet=None) -> bool:
         return False
 
 
-def _json(row: Credential, used: dict | None, fernet=None) -> dict:
-    return {
+def _login_info(session: Session, ids: list[int]) -> dict[int, tuple[str, str | None]]:
+    if not ids:
+        return {}
+    q = select(LoginSession.credential_id, LoginSession.status, LoginSession.last_error)
+    return {cid: (st, err) for cid, st, err in
+            session.execute(q.where(LoginSession.credential_id.in_(ids)))}
+
+
+def _json(row: Credential, used: dict | None, fernet=None, login: tuple | None = None) -> dict:
+    out = {
         "id": row.id, "name": row.name, "kind": row.kind, "header_name": row.header_name,
         "prefix": row.prefix, "param_name": row.param_name, "username": row.username,
         "has_secret": True, "readable": _readable(row, fernet),
         "created_at": iso(row.created_at), "updated_at": iso(row.updated_at),
         "last_used_at": iso(row.last_used_at), "last_error": row.last_error,
         "used_by": used or {"targets": [], "sources": []},
+        "login_url": row.login_url, "selectors": row.selectors, "extra_hosts": row.extra_hosts,
     }
+    if row.kind == "login":
+        out["login_status"], out["login_error"] = login or ("login_needed", None)
+    return out
 
 
 def _encrypt(secret: str) -> bytes:
@@ -149,6 +212,14 @@ def _get(session: Session, cid: int) -> Credential:
     return row
 
 
+def _cancel_attempts(session: Session, cid: int) -> None:
+    """Cancel the login's active sign-in (the worker never overwrites a cancelled one)."""
+    session.execute(
+        update(LoginAttempt)
+        .where(LoginAttempt.credential_id == cid, LoginAttempt.status.in_(ACTIVE_ATTEMPT_STATUSES))
+        .values(status="cancelled", code_enc=None, finished_at=func.now()))
+
+
 @router.get("/credentials/status")
 def credentials_status():
     """Whether KPI_SECRET_KEY is set, so the UI can say so before anyone tries to save a key."""
@@ -160,7 +231,8 @@ def list_credentials(session: Session = Depends(get_session)):
     rows = session.scalars(select(Credential).order_by(Credential.name)).all()
     used = _used_by(session)
     f = _fernet()
-    return [_json(r, used.get(r.id), f) for r in rows]
+    info = _login_info(session, [r.id for r in rows if r.kind == "login"])
+    return [_json(r, used.get(r.id), f, info.get(r.id)) for r in rows]
 
 
 @router.post("/credentials", status_code=201)
@@ -170,12 +242,16 @@ def create_credential(body: CredentialIn, session: Session = Depends(get_session
     row = Credential(name=body.name.strip(), kind=body.kind, secret_enc=_encrypt(body.secret), **fields)
     session.add(row)
     try:
+        session.flush()
+        if row.kind == "login":
+            session.add(LoginSession(credential_id=row.id, status="login_needed"))
         session.commit()
     except IntegrityError:
         session.rollback()
         raise HTTPException(409, "a key with this name already exists") from None
     session.refresh(row)
-    return JSONResponse(_json(row, None, _fernet()), status_code=201)
+    return JSONResponse(_json(row, None, _fernet(), _login_info(session, [row.id]).get(row.id)),
+                        status_code=201)
 
 
 @router.patch("/credentials/{cid}")
@@ -193,6 +269,13 @@ def patch_credential(cid: int, body: CredentialPatch, session: Session = Depends
     if name is None or kind is None:
         raise HTTPException(422, "name and kind cannot be null")
     fields = _validate(name, kind, fields, data.get("secret"))
+    if row.kind == "login" and kind != "login" and session.scalar(
+            select(WatchTarget.id).where(WatchTarget.credential_id == cid).limit(1)) is not None:
+        # Its KPIs are browser KPIs on the login's hosts; another kind cannot serve them.
+        raise HTTPException(409, "this login is used by KPIs")
+    if row.kind != "login" and kind == "login" and _used_by(session, [cid]).get(cid):
+        # Its KPIs and sources send it as a header/query/basic value; a login cannot.
+        raise HTTPException(409, "this key is used by KPIs")
     if kind == "header" and row.kind != "header" and "secret" not in data:
         # The stored secret was never checked as a header value; check it now.
         try:
@@ -203,6 +286,9 @@ def patch_credential(cid: int, body: CredentialPatch, session: Session = Depends
             ) from None
         if not HEADER_SAFE.match(stored):
             raise HTTPException(422, NOT_ASCII)
+    reset = kind == "login" and row.kind == "login" and (
+        "secret" in data or fields["username"] != row.username
+        or fields["login_url"] != row.login_url)
     if "secret" in data:
         row.secret_enc = _encrypt(data["secret"])
         row.last_error = None  # a new secret has not been rejected yet; last_used_at stays
@@ -210,12 +296,26 @@ def patch_credential(cid: int, body: CredentialPatch, session: Session = Depends
     for k, v in fields.items():
         setattr(row, k, v)
     try:
+        if kind == "login":
+            ls = session.get(LoginSession, cid)
+            if ls is None:
+                session.add(LoginSession(credential_id=cid, status="login_needed"))
+            elif reset:
+                ls.status, ls.state_enc, ls.last_error = "login_needed", None, None
+                ls.notified_at = None  # a new transition into login_needed alerts again
+                _cancel_attempts(session, cid)
+        else:
+            ls = session.get(LoginSession, cid)
+            if ls is not None:
+                session.delete(ls)
+                _cancel_attempts(session, cid)
         session.commit()
     except IntegrityError:
         session.rollback()
         raise HTTPException(409, "a key with this name already exists") from None
     session.refresh(row)
-    return _json(row, _used_by(session, [cid]).get(cid), _fernet())
+    return _json(row, _used_by(session, [cid]).get(cid), _fernet(),
+                 _login_info(session, [cid]).get(cid))
 
 
 @router.delete("/credentials/{cid}", status_code=204)

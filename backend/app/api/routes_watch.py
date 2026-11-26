@@ -25,7 +25,10 @@ from app.core.canonical import dims_to_json, key_hash_for
 from app.connectors.watch.connector import _process
 from app.connectors.watch.extract import flatten_json
 from app import credentials as creds
-from app.connectors.watch.fetch import NEEDS_HTTPS, NO_BROWSER_KEY, fetch_target
+from app import logins
+from app.connectors.watch.fetch import (
+    NEEDS_HTTPS, NO_BROWSER_KEY, FetchState, fetch_target, preflight,
+)
 from app.models import Credential, DataPoint, ImportPreview, Indicator, Source, WatchTarget
 
 router = APIRouter()
@@ -102,16 +105,30 @@ def _slugify(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "source"
 
 
-def _check_key(session: Session, credential_id: int | None, url: str, use_browser: bool) -> None:
-    """422 unless the key exists and the link is one a key may be sent to."""
+def _check_key(session: Session, credential_id: int | None, url: str, use_browser: bool) -> bool:
+    """422 unless the key exists and the link is one a key may be sent to. Returns the
+    browser mode to store: a login key is always fetched in the browser (and only on its
+    allowed hosts); other keys cannot be used with it."""
     if credential_id is None:
-        return
-    if session.get(Credential, credential_id) is None:
+        return use_browser
+    row = session.get(Credential, credential_id)
+    if row is None:
         raise HTTPException(422, "unknown key")
     if urlsplit(url).scheme != "https":
         raise HTTPException(422, NEEDS_HTTPS)
+    if row.kind == "login":
+        err = creds.login_host_error(row, url)
+        if err:
+            raise HTTPException(422, err)
+        return True
     if use_browser:
         raise HTTPException(422, NO_BROWSER_KEY)
+    return False
+
+
+def _is_login(session: Session, credential_id: int | None) -> bool:
+    return credential_id is not None and session.scalar(
+        select(Credential.kind).where(Credential.id == credential_id)) == "login"
 
 
 def _key_name(session: Session, credential_id: int | None) -> str | None:
@@ -191,7 +208,7 @@ def list_custom_sources(session: Session = Depends(get_session)):
 
 @router.post("/custom-sources", status_code=201)
 def create_target(body: TargetIn, session: Session = Depends(get_session)):
-    _check_key(session, body.credential_id, body.url, body.use_browser)
+    use_browser = _check_key(session, body.credential_id, body.url, body.use_browser)
     source = _find_source(session, body.source_name)
     if source is not None:
         msg = _conflict(session, source.id, body.kpi_name, body.url)
@@ -201,7 +218,7 @@ def create_target(body: TargetIn, session: Session = Depends(get_session)):
         if source is None:
             source = _new_source(session, body.source_name)
         t = _add_target(session, source, body.kpi_name, body.url, body.kind, body.selector,
-                        body.use_browser, body.credential_id)
+                        use_browser, body.credential_id)
         session.commit()
     except IntegrityError:
         session.rollback()
@@ -237,15 +254,20 @@ def patch_target(target_id: int, body: TargetPatch, session: Session = Depends(g
     new_url = body.url if body.url is not None else t.url
     renames, repoints = new_name != t.kpi_name, new_url != t.url
     new_key = body.credential_id if "credential_id" in body.model_fields_set else t.credential_id
-    _check_key(session, new_key, new_url,
-               body.use_browser if body.use_browser is not None else t.use_browser)
+    if body.use_browser is not None:
+        wanted = body.use_browser
+    elif new_key != t.credential_id and _is_login(session, t.credential_id):
+        wanted = False  # browser mode came with the login being replaced
+    else:
+        wanted = t.use_browser
+    use_browser = _check_key(session, new_key, new_url, wanted)
     disables = body.enabled is False and t.enabled
     if not (renames or repoints or disables):
-        _apply_patch(session, t, body, new_name, new_url)
+        _apply_patch(session, t, body, new_name, new_url, use_browser)
         return _target_json(t, key_name=_key_name(session, t.credential_id))
     with _source_lock(session, t.source_id):
         session.refresh(t)  # state may have changed while waiting
-        _apply_patch(session, t, body, new_name, new_url, supersede=True)
+        _apply_patch(session, t, body, new_name, new_url, use_browser, supersede=True)
     return _target_json(t, key_name=_key_name(session, t.credential_id))
 
 
@@ -255,7 +277,7 @@ HELD_REASON = "a change to the source's KPIs"
 
 
 def _apply_patch(session: Session, t: WatchTarget, body: TargetPatch, new_name: str,
-                 new_url: str, supersede: bool = False) -> None:
+                 new_url: str, use_browser: bool, supersede: bool = False) -> None:
     if (new_name, new_url) != (t.kpi_name, t.url):
         msg = _conflict(session, t.source_id, new_name, new_url, exclude_id=t.id)
         if msg:
@@ -287,9 +309,9 @@ def _apply_patch(session: Session, t: WatchTarget, body: TargetPatch, new_name: 
                 _delete_points(session, t.source_id, t.kpi_name)
                 t.needs_baseline = True
             t.enabled = body.enabled
-        for f in ("kind", "use_browser"):
-            if f in body.model_fields_set and getattr(body, f) is not None:
-                setattr(t, f, getattr(body, f))
+        if "kind" in body.model_fields_set and body.kind is not None:
+            t.kind = body.kind
+        t.use_browser = use_browser
         if "credential_id" in body.model_fields_set and body.credential_id != t.credential_id:
             # Like a re-point: with a different key (or none) the page may show different
             # content (a teaser vs the full page), so the next check is a silent baseline.
@@ -319,20 +341,32 @@ def delete_target(target_id: int, session: Session = Depends(get_session)):
 
 @router.post("/watch-targets/test")
 def test_link(body: TestIn, session: Session = Depends(get_session)):
-    """Fetch and extract once; nothing is written."""
-    _check_key(session, body.credential_id, body.url, body.use_browser)
+    """Fetch and extract once; nothing is written. With a login key the page is rendered
+    with the saved session only: no sign-in is tried (status login_needed instead)."""
+    use_browser = _check_key(session, body.credential_id, body.url, body.use_browser)
     entry = {"id": 0, "kpi_name": "", "url": body.url, "kind": body.kind,
              "selector": body.selector or None}
     cred = None
+    state = None
     if body.credential_id is not None:
         try:
             cred = creds.load(session, body.credential_id)
         except creds.KeyUnavailable as e:
             return {"status": "error", "kind": body.kind, "error": f"key unavailable ({e})"}
+        if cred.kind == "login":
+            state = logins.load_state(session, cred)
+        session.commit()  # end the read transaction: none held open during the fetch
     with httpx.Client(timeout=30) as client:
         try:
-            res = fetch_target(client, body.url, body.use_browser, credential=cred)
-            e = _process(entry, res)
+            if cred is not None and cred.kind == "login":
+                res = preflight(client, FetchState(), body.url)
+                if res is None:
+                    res, _, _ = logins.browser_fetch(body.url, cred, state, body.kind)
+            else:
+                res = fetch_target(client, body.url, use_browser, credential=cred)
+            e = _process(entry, res, cred)
+            if e.get("error"):
+                e["error"] = creds.redact(e["error"], cred)
         except Exception as exc:  # noqa: BLE001 - report, never 500
             return {"status": "error", "kind": body.kind, "error": f"unexpected error: {type(exc).__name__}"}
     out: dict = {"status": e["status"], "kind": e.get("kind", body.kind)}
@@ -353,7 +387,7 @@ def _classify(session: Session, rows: list[dict]) -> list[dict]:
     seen_urls: set[tuple[str, str]] = set()
     seen_names: set[tuple[str, str]] = set()
     known_sources: dict[str, Source | None] = {}
-    keys = {name.lower(): cid for cid, name in session.execute(select(Credential.id, Credential.name))}
+    keys = {row.name.lower(): row for row in session.scalars(select(Credential))}
     out = []
     for r in rows:
         res = {**r}
@@ -379,7 +413,15 @@ def _classify(session: Session, rows: list[dict]) -> list[dict]:
                 res.update(status="invalid", error=NEEDS_HTTPS)
                 out.append(res)
                 continue
-            res["credential_id"] = keys[key_name.lower()]
+            key = keys[key_name.lower()]
+            if key.kind == "login":
+                err = creds.login_host_error(key, r["url"])
+                if err:
+                    res.update(status="invalid", error=err)
+                    out.append(res)
+                    continue
+                res["use_browser"] = True  # a login KPI is always fetched in the browser
+            res["credential_id"] = key.id
         if src_key not in known_sources:
             known_sources[src_key] = _find_source(session, r["source_name"])
         src = known_sources[src_key]
@@ -438,13 +480,19 @@ def import_confirm(body: ConfirmIn, session: Session = Depends(get_session)):
 
 def _confirm_rows(session: Session, rows: list[dict]) -> dict:
     created_sources = created_targets = skipped = 0
-    known_keys = set(session.scalars(select(Credential.id)))
+    known_keys = {row.id: row for row in session.scalars(select(Credential))}
     for r in rows:
         if r["status"] not in ("new_source", "existing_source"):
             skipped += 1
             continue
-        if r.get("credential_id") is not None and r["credential_id"] not in known_keys:
+        cid = r.get("credential_id")
+        if cid is not None and cid not in known_keys:
             skipped += 1  # key deleted since the preview
+            continue
+        # The key may have changed since the preview: decide browser mode and hosts now.
+        use_browser = cid is not None and known_keys[cid].kind == "login"
+        if use_browser and creds.login_host_error(known_keys[cid], r["url"]):
+            skipped += 1
             continue
         source = _find_source(session, r["source_name"])
         if source is not None and _conflict(session, source.id, r["kpi_name"], r["url"]):
@@ -453,7 +501,8 @@ def _confirm_rows(session: Session, rows: list[dict]) -> dict:
         if source is None:
             source = _new_source(session, r["source_name"])
             created_sources += 1
-        _add_target(session, source, r["kpi_name"], r["url"], credential_id=r.get("credential_id"))
+        _add_target(session, source, r["kpi_name"], r["url"], use_browser=use_browser,
+                    credential_id=cid)
         created_targets += 1
     session.commit()
     return {"created_sources": created_sources, "created_targets": created_targets,

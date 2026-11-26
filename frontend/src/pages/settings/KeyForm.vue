@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ApiError, apiSend } from '../../api/client'
-import type { KeyIn, KeyKind, KeyPatch, StoredKey } from '../../api/types'
+import type { KeyIn, KeyKind, KeyPatch, LoginSelectors, StoredKey } from '../../api/types'
 
 // mode "replace" shows only the secret field (PATCH {secret}); "edit" leaves the secret blank to keep it.
 const props = defineProps<{ keyItem?: StoredKey | null; replace?: boolean; unavailable?: boolean }>()
@@ -14,6 +14,23 @@ const headerName = ref(props.keyItem?.header_name ?? 'Authorization')
 const prefix = ref(props.keyItem?.prefix ?? '')
 const paramName = ref(props.keyItem?.param_name ?? '')
 const username = ref(props.keyItem?.username ?? '')
+const loginUrl = ref(props.keyItem?.login_url ?? '')
+const loginUrlTouched = ref(false)
+const SEL_NAMES = ['username', 'password', 'submit', 'code'] as const
+const selectors = ref<Record<(typeof SEL_NAMES)[number], string>>({
+  username: props.keyItem?.selectors?.username ?? '', password: props.keyItem?.selectors?.password ?? '',
+  submit: props.keyItem?.selectors?.submit ?? '', code: props.keyItem?.selectors?.code ?? '',
+})
+const extraHosts = ref((props.keyItem?.extra_hosts ?? []).join(', '))
+const loginUrlOk = computed(() => {
+  try {
+    const u = new URL(loginUrl.value.trim())
+    return u.protocol === 'https:' && !!u.hostname && !/\s/.test(loginUrl.value.trim())
+  } catch {
+    return false
+  }
+})
+const loginUrlError = computed(() => (loginUrlTouched.value && !loginUrlOk.value ? 'login page must be https' : ''))
 // Write-only: lives only in this ref, is cleared right after the request, and is never logged or stored.
 const secret = ref('')
 const showSecret = ref(false)
@@ -33,6 +50,7 @@ const secretShort = computed(() => secret.value !== '' && secret.value.length < 
 const kindOk = computed(() => {
   if (kind.value === 'query') return paramName.value.trim() !== ''
   if (kind.value === 'basic') return username.value.trim() !== ''
+  if (kind.value === 'login') return loginUrlOk.value && username.value.trim() !== ''
   return true
 })
 const valid = computed(() => !(props.unavailable && (secretRequired.value || secret.value !== '')) && (props.replace ? true : name.value.trim() !== '' && kindOk.value) && (!secretRequired.value || secret.value !== '') && !secretShort.value)
@@ -49,7 +67,19 @@ onMounted(async () => {
   first.value?.focus()
 })
 
+function loginFields(): Partial<KeyIn> {
+  const sel: LoginSelectors = {}
+  for (const n of SEL_NAMES) if (selectors.value[n].trim()) sel[n] = selectors.value[n].trim()
+  const hosts = extraHosts.value.split(/[\s,]+/).filter(Boolean)
+  return {
+    header_name: null, prefix: null, param_name: null,
+    username: username.value.trim(), login_url: loginUrl.value.trim(),
+    selectors: Object.keys(sel).length ? sel : null, extra_hosts: hosts.length ? hosts : null,
+  }
+}
+
 function fields(): Partial<KeyIn> {
+  if (kind.value === 'login') return loginFields()
   return {
     header_name: kind.value === 'header' ? headerName.value.trim() || null : null,
     prefix: kind.value === 'header' ? prefix.value.trim() || null : null,
@@ -106,6 +136,7 @@ const title = computed(() => (props.replace ? `Replace secret for ${props.keyIte
         <label class="radio"><input v-model="kind" type="radio" name="kf-kind" value="header" /> Header (token or API key)</label>
         <label class="radio"><input v-model="kind" type="radio" name="kf-kind" value="query" /> Link parameter</label>
         <label class="radio"><input v-model="kind" type="radio" name="kf-kind" value="basic" /> Username and password</label>
+        <label class="radio"><input v-model="kind" type="radio" name="kf-kind" value="login" /> Browser login (site sign-in page)</label>
       </fieldset>
 
       <template v-if="kind === 'header'">
@@ -124,6 +155,20 @@ const title = computed(() => (props.replace ? `Replace secret for ${props.keyIte
         <input id="kf-param" v-model="paramName" type="text" class="mono" required autocomplete="off" placeholder="e.g. api_key" />
         <span class="hint muted">Added to the link as ?name=secret when it is fetched.</span>
       </div>
+      <template v-else-if="kind === 'login'">
+        <div class="field">
+          <label for="kf-loginurl">Login page <span class="req" aria-hidden="true">*</span></label>
+          <input
+            id="kf-loginurl" v-model="loginUrl" type="text" inputmode="url" class="mono" required autocomplete="off" placeholder="https://example.com/login"
+            :aria-invalid="loginUrlError ? 'true' : 'false'" aria-describedby="kf-loginurl-err" @blur="loginUrlTouched = true"
+          />
+          <span id="kf-loginurl-err" class="hint error-text" :role="loginUrlError ? 'alert' : undefined">{{ loginUrlError }}</span>
+        </div>
+        <div class="field">
+          <label for="kf-user">Username <span class="req" aria-hidden="true">*</span></label>
+          <input id="kf-user" v-model="username" type="text" required autocomplete="off" />
+        </div>
+      </template>
       <div v-else class="field">
         <label for="kf-user">Username <span class="req" aria-hidden="true">*</span></label>
         <input id="kf-user" v-model="username" type="text" required autocomplete="off" />
@@ -132,9 +177,9 @@ const title = computed(() => (props.replace ? `Replace secret for ${props.keyIte
 
     <div class="field">
       <label for="kf-secret">
-        {{ kind === 'basic' ? 'Password' : 'Secret' }}
+        {{ kind === 'basic' || kind === 'login' ? 'Password' : 'Secret' }}
         <span v-if="secretRequired" class="req" aria-hidden="true">*</span>
-        <span v-else class="muted"> — Leave blank to keep the current secret</span>
+        <span v-else class="muted"> — Leave blank to keep the current {{ kind === 'login' ? 'password' : 'secret' }}</span>
       </label>
       <div class="secret">
         <input
@@ -148,6 +193,25 @@ const title = computed(() => (props.replace ? `Replace secret for ${props.keyIte
         At least {{ MIN_SECRET }} characters.<template v-if="kind === 'header'"> Plain ASCII only (no accents or line breaks).</template>
       </span>
     </div>
+
+    <template v-if="kind === 'login' && !replace">
+      <details class="adv">
+        <summary>Advanced</summary>
+        <div class="adv-body">
+          <p class="muted hint">Only needed when the sign-in form isn't found automatically. Use CSS selectors.</p>
+          <div v-for="n in SEL_NAMES" :key="n" class="field">
+            <label :for="`kf-sel-${n}`">{{ n === 'code' ? 'Email code box' : n === 'submit' ? 'Submit button' : n === 'password' ? 'Password box' : 'Username box' }}</label>
+            <input :id="`kf-sel-${n}`" v-model="selectors[n]" type="text" class="mono" autocomplete="off" :placeholder="n === 'code' ? '#otp' : n === 'submit' ? 'button.login' : n === 'password' ? '#password' : '#email'" />
+          </div>
+          <div class="field">
+            <label for="kf-hosts">Also used on</label>
+            <input id="kf-hosts" v-model="extraHosts" type="text" class="mono" autocomplete="off" placeholder="app.example.com, api.example.com" />
+            <span class="hint muted">Other sites this login covers, separated by commas or spaces. KPIs must use the login page's site or one of these.</span>
+          </div>
+        </div>
+      </details>
+      <p class="muted small">Logins always use the built-in browser. If a site emails you a code, you'll enter it here when signing in.</p>
+    </template>
 
     <p v-if="unavailable" class="muted small">Secrets can't be saved until KPI_SECRET_KEY is set on the server.</p>
     <p v-if="error" class="error-text" role="alert">{{ error }}</p>
@@ -168,5 +232,7 @@ const title = computed(() => (props.replace ? `Replace secret for ${props.keyIte
 .radio input { accent-color: var(--accent); }
 .secret { display: flex; gap: 8px; }
 .secret input { flex: 1 1 auto; min-width: 0; }
+.adv summary { cursor: pointer; font-weight: 600; font-size: 0.875rem; color: var(--link); }
+.adv-body { display: flex; flex-direction: column; gap: 12px; padding-top: 10px; }
 .end { justify-content: flex-end; }
 </style>

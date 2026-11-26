@@ -210,6 +210,22 @@ def test_sources_have_attribution_and_incomplete(client, db_session, source):
         "Source: SIPRI Military Expenditure Database"
 
 
+def test_sources_count_targets_needing_sign_in(client, db_session, source):
+    from app.models import WatchTarget
+    other = Source(slug="o", name="O", area="a", access="watch")
+    db_session.add(other)
+    db_session.flush()
+    for i, (src, st, en) in enumerate([(source, "login_needed", True), (source, "login_needed", True),
+                                       (source, "login_needed", False), (source, "ok", True),
+                                       (other, "ok", True)]):
+        db_session.add(WatchTarget(source_id=src.id, kpi_name=f"k{i}", url=f"https://x.test/{i}",
+                                   last_status=st, enabled=en))
+    db_session.flush()
+    items = {i["slug"]: i for i in client.get("/api/sources").json()}
+    assert items["s"]["logins_needed"] == 2
+    assert items["o"]["logins_needed"] == 0
+
+
 def test_indicators_first_seen_set_on_insert_only(db_session, source):
     from app.connectors.base import IndicatorMeta
     from app.core.pipeline import _upsert_indicators
