@@ -436,3 +436,19 @@ def test_unnamed_code_box_wrong_code_fails(site):
     with pytest.raises(logins.LoginFailed) as e:
         logins.sign_in(cred_for(site), lambda: "000000", timeout_s=30)
     assert str(e.value) == "code was not accepted"
+
+
+@browser
+def test_browser_fetch_redacts_seeded_cookie_values(site):
+    """A page that echoes the session cookie never puts its value in the result."""
+    cred = cred_for(site)
+    state = logins.sign_in(cred, None)
+    sid = next(c["value"] for c in state["cookies"] if c["name"] == "sid")
+    assert len(sid) >= 8
+    short = {"name": "lang", "value": "DATA", "domain": "localhost", "path": "/"}
+    state = {**state, "cookies": state["cookies"] + [short]}
+    res, _, _ = logins.browser_fetch(site.url("/echo-cookie"), cred, state)
+    assert res.status == "ok"
+    assert sid.encode() not in res.body
+    assert b"sid=***" in res.body
+    assert PROTECTED.encode() in res.body  # a short value ("DATA") is left alone

@@ -383,7 +383,20 @@ def browser_fetch(url: str, cred: creds.Credential, state: dict | None,
         return FetchResult("error", error=f"browser error: {type(e).__name__}"), state, False
     if len(body) > MAX_BYTES:
         return FetchResult("error", ctype, error="too large"), state, False
-    return FetchResult("ok", ctype, creds.redact_bytes(body, cred)), out_state, False
+    return FetchResult("ok", ctype, _redact_cookies(creds.redact_bytes(body, cred), seed)), \
+        out_state, False
+
+
+MIN_REDACTED_COOKIE = 8  # shorter values ("en", "1") are too common to cut out of a page
+
+
+def _redact_cookies(body: bytes, seed: dict | None) -> bytes:
+    """Cut the seeded session's cookie values (a page may echo them) out of `body`,
+    longest first so a value inside another is not left half-shown."""
+    values = {str(c.get("value") or "") for c in (seed or {}).get("cookies", [])}
+    for v in sorted((v for v in values if len(v) >= MIN_REDACTED_COOKIE), key=len, reverse=True):
+        body = body.replace(v.encode("utf-8"), b"***")
+    return body
 
 
 def sign_in(cred: creds.Credential, code_provider: Callable[[], str | None] | None,

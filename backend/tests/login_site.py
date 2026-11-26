@@ -13,6 +13,7 @@ the browser is told to trust exactly that certificate's key (see `spki`). Pages:
 - GET /data             protected content, else 302 /login
 - GET /inline           protected content, else a login form in place (no redirect)
 - GET /echo             protected page that echoes the password (for redaction tests)
+- GET /echo-cookie      protected page that echoes the session cookie's value (redaction)
 - GET /pixel            sets the `tracker` cookie on whatever host served it
 - GET /login-redirect   302 to /login on the second host name (127.0.0.1)
 - GET /login-offsite    a form whose action posts to the second host name
@@ -257,9 +258,11 @@ class LoginSite:
                         self._send(401, '{"error": "unauthorized"}')
                     else:
                         self._send(302, "", {"Location": "/login"})
-                elif path in ("/data", "/inline", "/echo"):
+                elif path in ("/data", "/inline", "/echo", "/echo-cookie"):
                     if self._authed():
                         extra = f"<p>you are {site.password}</p>" if path == "/echo" else ""
+                        if path == "/echo-cookie":
+                            extra = f"<p>debug: sid={self._cookies().get('sid')}</p>"
                         self._send(200, f"<html><body><main>{PROTECTED}</main>{extra}"
                                         "</body></html>")
                     elif path == "/inline":
