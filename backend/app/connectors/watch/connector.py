@@ -179,10 +179,11 @@ class WatchConnector:
                     rows.append(RawRow("api", name, "", "", leaf, {"path": path}))
             else:
                 rows.append(RawRow("page", name, "", "", t["sha256"]))
+        # Per-target errors in the raw file are already scrubbed of any key.
+        shown = ", ".join(warnings[:5]) + (", …" if len(warnings) > 5 else "")
         if targets and failed == len(targets):
-            raise RuntimeError("all targets failed")
+            raise RuntimeError(f"all targets failed: {shown}")
         if warnings:  # one summary line, so the pipeline's "incomplete:" handling sees it
-            shown = ", ".join(warnings[:5]) + (", …" if len(warnings) > 5 else "")
             warnings = [f"incomplete: {len(warnings)} KPI(s) not checked: {shown}"]
         return ParseResult(
             rows=rows,

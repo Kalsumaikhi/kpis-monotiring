@@ -462,3 +462,28 @@ def test_key_unavailable_target_error(wenv, db_session, monkeypatch):
     run = pipeline.run_source(sf, "custom-x")
     assert "Price (error: key unavailable (KPI_SECRET_KEY not set))" in run.error
     assert not p.called
+
+
+@respx.mock
+def test_all_targets_rejected_names_key_in_run_error_and_alert(wenv, db_session):
+    from app.notify.mattermost import format_run_message
+    src, sf = wenv
+    c = mk_cred(db_session)
+    add_target(db_session, src, c)
+    robots()
+    respx.get("https://h.example/p").mock(return_value=httpx.Response(401))
+    sent = []
+
+    class Rec:
+        def notify_run(self, run, source, top, streak, extras=None):
+            sent.append(format_run_message(run, source, top, streak, dashboard_base_url="http://d",
+                                           consecutive_failure_alert=3, extras=extras))
+
+    run = pipeline.run_source(sf, "custom-x", notifier=Rec())
+    assert len(sent) == 1 and "check failed:" in sent[0]
+    assert "key rejected (HTTP 401)" in sent[0] and SECRET not in sent[0]
+    assert run.status == "failed"
+    assert "all targets failed: Price (key_rejected: key rejected (HTTP 401))" in run.error
+    assert SECRET not in run.error
+    db_session.expire_all()
+    assert db_session.get(Credential, c.id).last_error == "key rejected (HTTP 401)"
