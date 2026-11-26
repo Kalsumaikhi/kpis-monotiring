@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import re
 import shutil
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterable, Protocol
@@ -401,6 +402,20 @@ def _scrub_raw(dest: Path, cred: creds.Credential) -> None:
                 log.error("could not delete unscrubbed raw file %s", path.name)
 
 
+SKIPPED_DELETIONS = "key baseline skipped deletions"  # also read by the notifier
+
+
+def _skipped_deletions_before(session: Session, source_id: int, run_id: int) -> bool:
+    """Whether the source's previous applied run was a key baseline that skipped deletions.
+    Failed and held runs don't count, so a failure in between doesn't restart the count."""
+    error = session.scalar(
+        select(Run.error)
+        .where(Run.source_id == source_id, Run.id < run_id,
+               Run.status.in_(("ok", "no_change", "baseline")))
+        .order_by(Run.id.desc()).limit(1))
+    return SKIPPED_DELETIONS in (error or "")
+
+
 def run_source(
     session_factory: SessionFactory,
     slug: str,
@@ -511,10 +526,15 @@ def run_source(
                 if key_baseline and diff.existing > 0 \
                         and diff.removed / diff.existing > settings.suspect_removal_ratio:
                     # The new key returned far fewer rows (a wrong key, an outage): keep the
-                    # old rows (upsert only) and the flag, so the next run is silent too.
+                    # old rows (upsert only). The flag stays for one more silent try; after a
+                    # second short fetch it is cleared, so the next run's removal guard holds
+                    # the removals for review instead of the source staying silent forever.
                     apply_diff(session, source.id, run_id, False, record_changes=False)
-                    warnings.append(f"key baseline skipped deletions: {diff.removed} rows "
+                    warnings.append(f"{SKIPPED_DELETIONS}: {diff.removed} rows "
                                     "missing (over the safety limit)")
+                    if _skipped_deletions_before(session, source.id, run_id):
+                        session.get(Source, source.id).needs_baseline = False
+                    diff = replace(diff, removed=0)  # nothing was removed; the warning has N
                 else:
                     apply_diff(session, source.id, run_id, parsed.complete, record_changes=False)
                     if key_baseline:

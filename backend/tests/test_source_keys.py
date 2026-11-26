@@ -580,6 +580,7 @@ def test_key_baseline_over_removal_limit_keeps_rows_and_flag(env, db_session, cl
     run = pipeline.run_source(sf, "fake")
     assert run.status == "baseline"
     assert "key baseline skipped deletions: 9 rows missing (over the safety limit)" in run.error
+    assert run.removed == 0  # nothing was removed; the warning carries the count
     assert _dp_count(db_session, src) == 10
     assert _n_changes(db_session) == 0
     db_session.expire_all()
@@ -653,3 +654,44 @@ def test_key_rename_takes_no_lock_and_no_baseline(env, db_session, client, held_
     assert client.patch(f"/api/credentials/{k1.id}", json={"header_name": "X-Key"}).status_code == 200
     db_session.expire_all()
     assert db_session.get(Source, src.id).needs_baseline is False
+
+
+@respx.mock
+def test_key_baseline_skips_deletions_only_twice(env, db_session, client):
+    from app.models import PendingChange
+    src, conn, sf = env
+    k1 = mk_cred(db_session, name="K1")
+    respx.get("https://api.example.com/data").mock(return_value=httpx.Response(200, text="ok"))
+    conn.rows = [_row(f"C{i}", i) for i in range(10)]
+    pipeline.run_source(sf, "fake")
+    assert client.patch("/api/sources/fake", json={"credential_id": k1.id}).status_code == 200
+    conn.rows = [_row("C0", 0)]
+    flags = []
+    runs = []
+    for _ in range(2):
+        runs.append(pipeline.run_source(sf, "fake"))
+        db_session.expire_all()
+        flags.append(db_session.get(Source, src.id).needs_baseline)
+    assert [r.status for r in runs] == ["baseline", "baseline"]
+    assert all("key baseline skipped deletions" in r.error for r in runs)
+    assert flags == [True, False]  # a second short fetch is not a reason to stay silent
+    assert _n_changes(db_session) == 0 and _dp_count(db_session, src) == 10
+    third = pipeline.run_source(sf, "fake")
+    assert third.status == "suspect_pending"  # the removal guard holds it for review
+    assert _dp_count(db_session, src) == 10
+    assert db_session.scalar(select(func.count()).select_from(PendingChange).where(
+        PendingChange.run_id == third.id, PendingChange.change_type == "removed")) == 9
+
+
+def test_key_edit_409_when_a_source_took_the_key_meanwhile(env, db_session, client, monkeypatch):
+    from app.api import routes_credentials
+    src, conn, sf = env
+    k1 = mk_cred(db_session, name="K1")
+    db_session.commit()
+    before = db_session.get(Credential, k1.id).secret_enc
+    calls = iter([[], [src.id]])  # before the locks: unused; after: given to a source
+    monkeypatch.setattr(routes_credentials, "_affected_sources", lambda s, cid: next(calls))
+    r = client.patch(f"/api/credentials/{k1.id}", json={"secret": "sk-rotated-secret"})
+    assert r.status_code == 409 and r.json()["detail"] == BUSY_KEY
+    db_session.expire_all()
+    assert db_session.get(Credential, k1.id).secret_enc == before

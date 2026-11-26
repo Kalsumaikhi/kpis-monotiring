@@ -18,6 +18,7 @@ from app import credentials as creds
 from app.api.deps import get_session
 from app.api.util import iso, source_lock
 from app.core.pipeline import _supersede_held
+from app.api.routes_sources import KEY_CHANGE, _supports_keys
 from app.models import ACTIVE_ATTEMPT_STATUSES, Credential, LoginAttempt, LoginSession, Source, WatchTarget
 
 router = APIRouter()
@@ -288,12 +289,16 @@ def patch_credential(cid: int, body: CredentialPatch, session: Session = Depends
             ) from None
         if not HEADER_SAFE.match(stored):
             raise HTTPException(422, NOT_ASCII)
-    affected = _affected_sources(session, cid) if _changes_what_is_sent(row, kind, fields, data) \
-        else []
+    sends_change = _changes_what_is_sent(row, kind, fields, data)
+    affected = _affected_sources(session, cid) if sends_change else []
     with ExitStack() as locks:
         # Try-locks only, in id order; a busy one releases those already held (409).
         for sid in affected:
             locks.enter_context(source_lock(session, sid, BUSY_KEY))
+        if sends_change and not set(_affected_sources(session, cid)) <= set(affected):
+            # The key was given to another source meanwhile; its lock is not held.
+            session.rollback()
+            raise HTTPException(409, BUSY_KEY)
         _patch(session, row, cid, data, name, kind, fields, affected)
     session.refresh(row)
     return _json(row, _used_by(session, [cid]).get(cid), _fernet(),
@@ -321,7 +326,6 @@ def _changes_what_is_sent(row: Credential, kind: str, fields: dict, data: dict) 
 def _affected_sources(session: Session, cid: int) -> list[int]:
     """Sources whose fetched data depends on this key: those that send it as their own key
     (when the connector sends keys) and custom sources with KPIs that use it."""
-    from app.api.routes_sources import _supports_keys
     ids = {s.id for s in session.scalars(select(Source).where(Source.credential_id == cid))
            if _supports_keys(session, s)}
     ids |= set(session.scalars(
@@ -364,7 +368,7 @@ def _patch(session: Session, row: Credential, cid: int, data: dict, name: str, k
             session.execute(update(WatchTarget).where(WatchTarget.credential_id == cid)
                             .values(needs_baseline=True))
             for sid in affected:
-                _supersede_held(session, sid, reason="a key change")
+                _supersede_held(session, sid, reason=KEY_CHANGE)
         session.commit()
     except IntegrityError:
         session.rollback()
