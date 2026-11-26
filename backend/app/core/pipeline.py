@@ -438,6 +438,10 @@ def run_source(
             session.add(run)
             session.commit()
         run_id = run.id
+        # Read under the lock: a key change takes it too, so this stays true for the whole
+        # run (see patch_source). Only a fetched run is the new key's baseline.
+        session.refresh(source)
+        key_baseline = source.needs_baseline and from_raw is None and not force_hold
 
         cred = None
         state = None
@@ -501,9 +505,12 @@ def run_source(
                 )
             )
             run = session.get(Run, run_id)
-            if not has_history:
+            if not has_history or key_baseline:
                 apply_diff(session, source.id, run_id, parsed.complete, record_changes=False)
                 status = "baseline"
+                if key_baseline and parsed.complete:
+                    # An incomplete run left some old-key rows; the next run is silent too.
+                    session.get(Source, source.id).needs_baseline = False
             elif (
                 (diff.existing > 0 and diff.removed / diff.existing > settings.suspect_removal_ratio)
                 or (force_hold and diff.added + diff.altered + diff.removed > 0)

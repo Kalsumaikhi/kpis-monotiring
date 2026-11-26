@@ -5,7 +5,6 @@ from __future__ import annotations
 import re
 import secrets
 import shutil
-from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal
@@ -20,9 +19,9 @@ from sqlalchemy.orm import Session
 
 from app import watch_import
 from app.api.deps import get_session
-from app.api.util import iso
+from app.api.util import iso, source_lock as _source_lock
 from app.connectors.watch import noisy_target_ids
-from app.core.pipeline import SourceBusyError, _acquire_source_lock, _supersede_held
+from app.core.pipeline import _supersede_held
 from app.core.canonical import dims_to_json, key_hash_for
 from app.connectors.watch.connector import _process
 from app.connectors.watch.extract import flatten_json
@@ -239,20 +238,6 @@ def _target_or_404(session: Session, target_id: int) -> WatchTarget:
     return t
 
 
-@contextmanager
-def _source_lock(session: Session, source_id: int, busy: str = "source is running, try again"):
-    """Non-blocking per-source advisory lock (same as run_source); 409 while a run holds it."""
-    try:
-        release = _acquire_source_lock(session, source_id)
-    except SourceBusyError:
-        session.rollback()
-        raise HTTPException(409, busy) from None
-    try:
-        yield
-    finally:
-        release()
-
-
 @router.delete("/custom-sources/{slug}", status_code=204)
 def delete_custom_source(slug: str, session: Session = Depends(get_session)):
     """Remove a custom source with all its rows and raw files. Silent: no Mattermost post.
@@ -299,7 +284,10 @@ def patch_target(target_id: int, body: TargetPatch, session: Session = Depends(g
         wanted = t.use_browser
     use_browser = _check_key(session, new_key, new_url, wanted)
     disables = body.enabled is False and t.enabled
-    if not (renames or repoints or disables):
+    # A key change sets needs_baseline; under the lock no run can be fetching with the old key
+    # (and clear the flag when it finishes), and a held run diffed with the old key is dropped.
+    rekeys = new_key != t.credential_id
+    if not (renames or repoints or disables or rekeys):
         _apply_patch(session, t, body, new_name, new_url, use_browser)
         return _target_json(t, key_name=_key_name(session, t.credential_id))
     with _source_lock(session, t.source_id):
@@ -309,7 +297,7 @@ def patch_target(target_id: int, body: TargetPatch, session: Session = Depends(g
 
 
 # Held runs were diffed against the targets as they were; applying one after a KPI changed
-# would write data under a stale name or link, so changing a KPI drops them.
+# would write data under a stale name, link or key, so changing a KPI drops them.
 HELD_REASON = "a change to the source's KPIs"
 
 

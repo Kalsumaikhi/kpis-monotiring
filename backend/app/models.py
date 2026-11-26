@@ -55,6 +55,9 @@ class Source(Base):
     config: Mapped[dict[str, Any]] = mapped_column(JSONB, server_default=text("'{}'::jsonb"))
     credential_id: Mapped[int | None] = mapped_column(
         ForeignKey("credentials.id", ondelete="RESTRICT"))
+    # Set when the key changes (only for connectors that send one); the next fetched run is
+    # a silent baseline. Set and cleared only under the per-source lock (see patch_source).
+    needs_baseline: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
     created_at: Mapped[datetime] = _now()
 
 

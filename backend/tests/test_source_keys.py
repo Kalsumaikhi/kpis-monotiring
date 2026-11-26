@@ -2,7 +2,7 @@ import httpx
 import pytest
 import respx
 from cryptography.fernet import Fernet
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app import credentials as creds
 from app.api import deps
@@ -430,3 +430,107 @@ def test_apply_refuses_login_key():
                             login_url="https://x.example.com/l")
     with pytest.raises(ValueError):
         creds.apply(cred, "https://x.example.com/data", {})
+
+
+# --- key change: silent baseline and held runs (plan 3a task 4) -------------------
+
+def _row(country, value):
+    from app.core.canonical import RawRow
+    return RawRow("d", "i", country, "2020", value)
+
+
+@pytest.fixture
+def other_lock(db_engine):
+    """Hold the source lock from another connection, as an in-flight run does."""
+    from sqlalchemy import text
+    held = []
+
+    def hold(source_id):
+        c = db_engine.connect()
+        params = {"ns": pipeline.LOCK_NAMESPACE, "sid": source_id}
+        c.execute(text("SELECT pg_advisory_lock(:ns, :sid)"), params)
+
+        def release():
+            c.execute(text("SELECT pg_advisory_unlock(:ns, :sid)"), params)
+            c.close()
+            held.remove(release)
+        held.append(release)
+        return release
+    yield hold
+    for release in list(held):
+        release()
+
+
+@respx.mock
+def test_key_change_during_run_keeps_baseline(env, db_session, client, other_lock):
+    from app.models import Change, Run
+    src, conn, sf = env
+    k1, k2 = mk_cred(db_session, name="K1"), mk_cred(db_session, name="K2", secret="sk-other-secret")
+    respx.get("https://api.example.com/data").mock(return_value=httpx.Response(200, text="ok"))
+    conn.rows = [_row("AT", 1)]
+    assert pipeline.run_source(sf, "fake").status == "baseline"
+    assert client.patch("/api/sources/fake", json={"credential_id": k1.id}).status_code == 200
+    db_session.expire_all()
+    assert db_session.get(Source, src.id).needs_baseline is True
+    # A run is fetching (it holds the source lock): the key can't change under it, so the
+    # run can't finish with the old key and clear the flag the new key needs.
+    release = other_lock(src.id)
+    r = client.patch("/api/sources/fake", json={"credential_id": k2.id})
+    assert r.status_code == 409 and "running" in r.json()["detail"]
+    # cron/enabled edits are not blocked by a run
+    assert client.patch("/api/sources/fake", json={"enabled": True}).status_code == 200
+    release()
+    db_session.expire_all()
+    assert db_session.get(Source, src.id).credential_id == k1.id
+    assert db_session.get(Source, src.id).needs_baseline is True
+    # the key unlocks more data, and one value differs: still a silent baseline
+    conn.rows = [_row("AT", 2), _row("BE", 3), _row("CZ", 4)]
+    run = pipeline.run_source(sf, "fake")
+    assert run.status == "baseline", run.error
+    assert db_session.scalar(select(func.count()).select_from(Change)) == 0
+    db_session.expire_all()
+    assert db_session.get(Source, src.id).needs_baseline is False
+    # after the baseline, changes alert as usual
+    conn.rows = [_row("AT", 5), _row("BE", 3), _row("CZ", 4)]
+    run = pipeline.run_source(sf, "fake")
+    assert run.status == "ok" and run.altered == 1
+    # the same key again is not a change; no key is
+    assert client.patch("/api/sources/fake", json={"credential_id": k1.id}).status_code == 200
+    db_session.expire_all()
+    assert db_session.get(Source, src.id).needs_baseline is False
+    assert client.patch("/api/sources/fake", json={"credential_id": None}).status_code == 200
+    db_session.expire_all()
+    assert db_session.get(Source, src.id).needs_baseline is True
+    assert db_session.scalar(select(func.count()).select_from(Run).where(
+        Run.source_id == src.id, Run.status == "failed")) == 0
+
+
+@respx.mock
+def test_key_change_supersedes_held_run(env, db_session, client):
+    from app.models import PendingChange, Run
+    src, conn, sf = env
+    k1 = mk_cred(db_session, name="K1")
+    respx.get("https://api.example.com/data").mock(return_value=httpx.Response(200, text="ok"))
+    conn.rows = [_row("AT", 1), _row("BE", 2)]
+    pipeline.run_source(sf, "fake")
+    conn.rows = [_row("AT", 9), _row("BE", 2)]
+    held = pipeline.run_source(sf, "fake", force_hold=True)
+    assert held.status == "suspect_pending"
+    assert client.patch("/api/sources/fake", json={"credential_id": k1.id}).status_code == 200
+    db_session.expire_all()
+    run = db_session.get(Run, held.id)
+    assert run.status == "superseded" and "key" in run.error
+    assert db_session.scalar(select(func.count()).select_from(PendingChange).where(
+        PendingChange.run_id == held.id)) == 0
+    assert client.post(f"/api/runs/{held.id}/approve").status_code == 409
+
+
+def test_key_change_on_source_without_key_hosts_is_not_a_baseline(db_session, client, monkeypatch):
+    src = Source(slug="plain", name="Plain", area="test", access="manual")
+    db_session.add(src)
+    db_session.flush()
+    monkeypatch.setitem(registry.CONNECTORS, "plain", FakeConnector())
+    k1 = mk_cred(db_session, name="K1")
+    assert client.patch("/api/sources/plain", json={"credential_id": k1.id}).status_code == 200
+    db_session.expire_all()
+    assert db_session.get(Source, src.id).needs_baseline is False

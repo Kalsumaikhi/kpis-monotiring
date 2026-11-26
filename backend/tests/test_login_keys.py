@@ -235,11 +235,13 @@ def test_downgrade_refused_with_login_keys(db_engine):
         with e.begin() as c:
             c.execute(text("INSERT INTO credentials (name, kind, secret_enc, login_url, username) "
                            "VALUES ('x','login','\\x01','https://a.example.com/','u')"))
+        with e.connect() as c:
+            head = c.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
         r = alembic("downgrade", "0007")
         assert r.returncode != 0 and "delete login keys before downgrading 0008" in r.stderr
         with e.connect() as c:
             assert c.execute(text("SELECT count(*) FROM credentials")).scalar_one() == 1
-            assert c.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "0008"
+            assert c.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == head
             assert c.execute(text("SELECT to_regclass('login_sessions')")).scalar_one() is not None
         with e.begin() as c:
             c.execute(text("DELETE FROM credentials"))
