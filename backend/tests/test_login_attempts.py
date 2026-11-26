@@ -808,3 +808,16 @@ def test_get_attempt_past_window_reads_expired(client, db_session, left):
     r = client.get(f"/api/logins/{c.id}/attempt").json()
     assert r["status"] == "expired" and r["error"] == EXPIRED and r["remaining_seconds"] == 0
     assert attempt(db_session, aid).status == "waiting_code"  # a read-only projection
+
+
+def test_get_attempt_past_window_with_stored_code_still_waiting(client, db_session):
+    # A code typed just before the deadline is still accepted by the worker:
+    # the dashboard must not show "expired" while it waits to be picked up.
+    c = mk_login(db_session)
+    aid = start(client, c.id)
+    db_session.execute(update(LoginAttempt).where(LoginAttempt.id == aid).values(
+        status="waiting_code", code_enc=b"x",
+        waiting_since=func.now() - timedelta(minutes=11)))
+    db_session.commit()
+    r = client.get(f"/api/logins/{c.id}/attempt").json()
+    assert r["status"] == "waiting_code" and r["error"] is None and r["remaining_seconds"] == 0

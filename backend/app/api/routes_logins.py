@@ -91,7 +91,9 @@ def latest_attempt(cid: int, session: Session = Depends(get_session)):
         # Server clock: the dashboard counts down from this, never from its own clock.
         now = session.scalar(select(func.now()))
         remaining = max(0, int((expires - now).total_seconds()))
-        if now >= expires:  # read-only: the worker or a late code writes the row itself
+        # read-only: the worker or a late code writes the row itself. A code stored
+        # before the deadline is still taken by the worker, so it is not "expired" yet.
+        if now >= expires and a.code_enc is None:
             status, error = "expired", EXPIRED
     return {"attempt_id": a.id, "status": status, "error": error,
             "waiting_since": iso(a.waiting_since), "expires_at": iso(expires),
