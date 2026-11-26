@@ -13,6 +13,7 @@ Revision ID: 0010
 Revises: 0009
 """
 import logging
+import sys
 
 import sqlalchemy as sa
 from alembic import op
@@ -55,8 +56,10 @@ def upgrade() -> None:
         "SELECT id, source_id, kpi_name FROM watch_targets ORDER BY id")).all()
     renames = _renames([tuple(r) for r in rows])
     for tid, sid, old, new in renames:
-        log.warning("0010: watch target %s in source %s renamed from %r to %r "
-                    "(duplicate KPI name)", tid, sid, old, new)
+        line = (f"0010: watch target {tid} in source {sid} renamed from {old!r} to {new!r} "
+                "(duplicate KPI name)")
+        log.warning(line)
+        print(line, file=sys.stderr)  # also when logging is not configured
         conn.execute(sa.text("UPDATE watch_targets SET kpi_name = :new, needs_baseline = true "
                              "WHERE id = :id"), {"new": new, "id": tid})
     for sid, old in {(sid, old) for _, sid, old, _ in renames}:
@@ -76,7 +79,9 @@ def upgrade() -> None:
         if held:
             conn.execute(sa.text("DELETE FROM pending_changes WHERE run_id = ANY(:ids)"),
                          {"ids": list(held)})
-            log.warning("0010: held run(s) %s of source %s superseded", held, sid)
+            line = f"0010: held run(s) {held} of source {sid} superseded"
+            log.warning(line)
+            print(line, file=sys.stderr)
     op.execute(f"CREATE UNIQUE INDEX IF NOT EXISTS {INDEX} "
                "ON watch_targets (source_id, lower(kpi_name))")
 

@@ -39,6 +39,7 @@ def db_engine():
     cfg = Config(str(BACKEND_DIR / "alembic.ini"))
     cfg.set_main_option("script_location", str(BACKEND_DIR / "migrations"))
     cfg.set_main_option("sqlalchemy.url", TEST_DATABASE_URL)
+    cfg.attributes["configure_logger"] = False  # keep pytest's logging as it is
     command.upgrade(cfg, "head")
     yield engine
     engine.dispose()

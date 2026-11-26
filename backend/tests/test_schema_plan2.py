@@ -161,3 +161,48 @@ def test_migration_0010_dedupes_kpi_names_then_adds_unique_index(db_session, cap
                 {"s": a.id})
     with ops():
         mod.upgrade()  # idempotent on a clean table: nothing renamed, the index is kept
+
+
+def test_migration_0010_renames_are_shown_by_the_alembic_cli(db_engine):
+    """`alembic upgrade head` shows each rename: through alembic's logging (env.py configures
+    it from alembic.ini) and on stderr."""
+    import os
+    import subprocess
+    import sys
+
+    from sqlalchemy import create_engine, text
+    from sqlalchemy.engine import make_url
+
+    from tests.conftest import BACKEND_DIR
+
+    base = make_url(db_engine.url.render_as_string(hide_password=False))
+    name = f"{base.database}_m10"
+    url = base.set(database=name)
+    with db_engine.connect().execution_options(isolation_level="AUTOCOMMIT") as c:
+        c.execute(text(f"DROP DATABASE IF EXISTS {name}"))
+        c.execute(text(f"CREATE DATABASE {name}"))
+    env = {**os.environ, "DATABASE_URL": url.render_as_string(hide_password=False)}
+
+    def alembic(*args):
+        r = subprocess.run([sys.executable, "-m", "alembic", *args], env=env, cwd=str(BACKEND_DIR),
+                           capture_output=True, text=True)
+        assert r.returncode == 0, r.stderr
+        return r.stderr
+
+    e = create_engine(url)
+    try:
+        alembic("upgrade", "0009")
+        with e.begin() as c:
+            sid = c.execute(text("INSERT INTO sources (slug, name, area, access) "
+                                 "VALUES ('w', 'W', 'custom', 'watch') RETURNING id")).scalar_one()
+            for i, n in enumerate(("Price", "PRICE")):
+                c.execute(text("INSERT INTO watch_targets (source_id, kpi_name, url) "
+                               "VALUES (:s, :n, :u)"), {"s": sid, "n": n, "u": f"https://h.example/{i}"})
+        err = alembic("upgrade", "head")
+        assert "Running upgrade 0009 -> 0010" in err  # alembic's own INFO logging is configured
+        assert "[alembic.runtime.migration]" in err and "'PRICE (2)'" in err
+        assert err.count("'PRICE (2)'") >= 2  # the log line and the plain stderr line
+    finally:
+        e.dispose()
+        with db_engine.connect().execution_options(isolation_level="AUTOCOMMIT") as c:
+            c.execute(text(f"DROP DATABASE IF EXISTS {name} WITH (FORCE)"))
