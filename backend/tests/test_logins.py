@@ -48,10 +48,10 @@ def secret_key(monkeypatch):
 
 
 @pytest.fixture
-def site(tmp_path, monkeypatch):
+def site(tmp_path, monkeypatch, trust_test_cert):
     monkeypatch.setattr(get_settings(), "watch_allowed_hosts", "127.0.0.1,localhost")
     s = LoginSite(USER, PASSWORD, code_file=tmp_path / "code.txt")
-    monkeypatch.setenv(fetch_mod.TEST_TRUSTED_SPKI_ENV, s.spki)
+    trust_test_cert(s.spki)
     yield s
     s.close()
 
@@ -92,6 +92,37 @@ def test_filter_state_keeps_allowed_hosts_and_parent_domains():
     out = logins.filter_state(state, {"app.example.com"})
     assert [c["name"] for c in out["cookies"]] == ["a", "b"]
     assert [o["origin"] for o in out["origins"]] == ["https://app.example.com"]
+
+
+def test_filter_state_ip_exact_public_suffix_and_https_origins():
+    state = {
+        "cookies": [
+            {"name": "ip", "value": "1", "domain": "10.0.0.5", "path": "/"},
+            {"name": "ipparent", "value": "2", "domain": "0.0.5", "path": "/"},
+            {"name": "suffix", "value": "3", "domain": ".co.uk", "path": "/"},
+            {"name": "tld", "value": "4", "domain": ".uk", "path": "/"},
+            {"name": "parent", "value": "5", "domain": ".shop.co.uk", "path": "/"},
+        ],
+        "origins": [
+            {"origin": "http://app.shop.co.uk", "localStorage": []},
+            {"origin": "https://app.shop.co.uk", "localStorage": []},
+        ],
+    }
+    out = logins.filter_state(state, {"10.0.0.5", "app.shop.co.uk"})
+    assert [c["name"] for c in out["cookies"]] == ["ip", "parent"]
+    assert [o["origin"] for o in out["origins"]] == ["https://app.shop.co.uk"]
+
+
+def test_test_spki_needs_kpi_testing(monkeypatch):
+    pin = "A" * 43 + "="  # base64 of 32 bytes
+    monkeypatch.setenv(fetch_mod.TEST_TRUSTED_SPKI_ENV, pin)
+    monkeypatch.delenv(fetch_mod.TESTING_ENV, raising=False)
+    assert not any("spki" in a for a in fetch_mod._launch_options("http://p")["args"])
+    monkeypatch.setenv(fetch_mod.TESTING_ENV, "1")
+    assert f"--ignore-certificate-errors-spki-list={pin}" in fetch_mod._launch_options(
+        "http://p")["args"]
+    monkeypatch.setenv(fetch_mod.TEST_TRUSTED_SPKI_ENV, "not-a-pin")
+    assert not any("spki" in a for a in fetch_mod._launch_options("http://p")["args"])
 
 
 def test_save_and_load_state_encrypted_and_filtered(db_session):
@@ -304,3 +335,56 @@ def test_password_not_in_any_output(site, caplog):
     assert "***" in res.body.decode()
     sid = next(c["value"] for c in new_state["cookies"] if c["name"] == "sid")
     assert sid not in caplog.text
+
+
+def _password_posted(site):
+    return [(h, p) for h, p, body in site.posts if "password=" in body]
+
+
+@browser
+def test_login_redirect_to_other_site_types_nothing(site):
+    # 127.0.0.1 passes the destination policy but is not a host of this login
+    with pytest.raises(logins.LoginFailed) as e:
+        logins.sign_in(cred_for(site, path="/login-redirect"), None)
+    assert str(e.value) == "login failed: login page moved to another site"
+    assert _password_posted(site) == []
+
+
+@browser
+def test_form_posting_to_other_site_types_nothing(site):
+    with pytest.raises(logins.LoginFailed) as e:
+        logins.sign_in(cred_for(site, path="/login-offsite"), None)
+    assert str(e.value) == "login failed: login page moved to another site"
+    assert site.posts == []
+
+
+@browser
+def test_wrong_password_with_promo_code_box_fails_fast(site):
+    cred = cred_for(site, path="/login-promo")
+    cred.secret = "Wrong-password-99"
+    start = time.monotonic()
+    with pytest.raises(logins.LoginFailed) as e:  # not LoginNeedsCode
+        logins.sign_in(cred, None)
+    assert str(e.value) == "login failed: still on the login page"
+    assert time.monotonic() - start < 30
+
+
+@browser
+def test_unrelated_pin_box_after_code_is_success(site):
+    site.code_mode = True
+    site.pin_after_code = True
+    state = logins.sign_in(cred_for(site), code_from(site), timeout_s=30)
+    assert any(c["name"] == "sid" for c in state["cookies"])
+
+
+@browser
+def test_code_provider_error(site):
+    site.code_mode = True
+
+    def broken():
+        raise RuntimeError("db down " + PASSWORD)
+
+    with pytest.raises(logins.LoginFailed) as e:
+        logins.sign_in(cred_for(site), broken, timeout_s=30)
+    assert str(e.value) == "could not read the code"
+    assert e.value.__cause__ is None and e.value.__suppress_context__

@@ -165,21 +165,36 @@ BROWSER_ARGS = [
 
 
 # TEST ONLY: base64 SHA-256 of one certificate's public key that Chromium should accept
-# although no CA signed it (the login-engine tests' self-signed site). Never set it in
-# production; it trusts only that key, not "any certificate".
+# although no CA signed it (the login-engine tests' self-signed site). Honoured only when
+# KPI_TESTING=1 is also set. Never set either in production; it trusts only that key, not
+# "any certificate".
 TEST_TRUSTED_SPKI_ENV = "KPI_TEST_TRUSTED_SPKI"
+TESTING_ENV = "KPI_TESTING"
+_spki_warned = False
+
+
+def _test_spki() -> str | None:
+    global _spki_warned
+    spki = os.environ.get(TEST_TRUSTED_SPKI_ENV, "").strip()
+    if not spki or os.environ.get(TESTING_ENV) != "1":
+        return None
+    try:
+        if len(base64.b64decode(spki, validate=True)) != 32:
+            return None
+    except ValueError:
+        return None
+    if not _spki_warned:
+        _spki_warned = True
+        log.warning("%s is set: the browser trusts one extra certificate key (tests only)",
+                    TEST_TRUSTED_SPKI_ENV)
+    return spki
 
 
 def _launch_options(proxy_url: str) -> dict:
     args = list(BROWSER_ARGS)
-    spki = os.environ.get(TEST_TRUSTED_SPKI_ENV, "").strip()
+    spki = _test_spki()
     if spki:
-        try:
-            ok = len(base64.b64decode(spki, validate=True)) == 32
-        except ValueError:
-            ok = False
-        if ok:
-            args.append(f"--ignore-certificate-errors-spki-list={spki}")
+        args.append(f"--ignore-certificate-errors-spki-list={spki}")
     launch: dict = {"proxy": {"server": proxy_url}, "args": args}
     exe = os.environ.get("KPI_CHROMIUM_PATH")
     if exe:

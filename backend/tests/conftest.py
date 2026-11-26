@@ -137,3 +137,13 @@ def held_lock(db_engine):
         c.execute(text("SELECT pg_advisory_unlock(:ns, :sid)"),
                   {"ns": pipeline.LOCK_NAMESPACE, "sid": sid})
         c.close()
+
+
+@pytest.fixture
+def trust_test_cert(monkeypatch):
+    """Returns a function that makes test browsers trust one self-signed key (test only):
+    sets KPI_TESTING=1 and KPI_TEST_TRUSTED_SPKI for this test."""
+    def trust(spki: str) -> None:
+        monkeypatch.setenv("KPI_TESTING", "1")
+        monkeypatch.setenv("KPI_TEST_TRUSTED_SPKI", spki)
+    return trust

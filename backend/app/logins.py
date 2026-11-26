@@ -10,6 +10,7 @@ code: errors are fixed strings (plus an exception type name) and page bodies are
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import logging
 import time
@@ -32,9 +33,18 @@ from app.models import LoginSession
 
 log = logging.getLogger(__name__)
 
+SIGN_IN_BUDGET_S = 120.0  # whole sign-in, not counting the wait for the emailed code
 SUBMIT_WAIT_S = 15.0  # after a submit: wait this long for a navigation or network idle
 CODE_POLL_S = 2.0
 LOGIN_NEEDED = "login needed"
+MOVED = "login failed: login page moved to another site"
+STILL_ON_LOGIN = "login failed: still on the login page"
+# Common multi-part public suffixes: a cookie for one of these would cover unrelated sites.
+# Not a full Public Suffix List (no new dependency); browsers refuse such cookies anyway.
+MULTI_PART_SUFFIXES = frozenset({
+    "co.uk", "org.uk", "gov.uk", "ac.uk", "com.au", "co.jp", "com.br", "co.in", "co.nz",
+    "com.sa", "com.eg", "com.tr",
+})
 MARK = "data-kpi-login"
 
 _VISIBLE_JS = """el => { if (!el) return false; const s = getComputedStyle(el);
@@ -90,6 +100,18 @@ _FIND_CODE_JS = f"""() => {{ const vis = {_VISIBLE_JS};
 _HAS_VISIBLE_PASSWORD_JS = f"""() => {{ const vis = {_VISIBLE_JS};
   return [...document.querySelectorAll('input[type=password]')].some(vis); }}"""
 
+# Where submitting the form around `el` sends its data: form.action (resolved; defaults to
+# the page URL) plus the submit button's formAction when it overrides it.
+_FORM_TARGETS_JS = """(el, btn) => { const out = [el.form ? el.form.action : location.href];
+  if (btn && btn.formAction) out.push(btn.formAction);
+  return out; }"""
+
+_BOX_SIG_JS = "el => [el.getAttribute('name') || '', el.id || '']"
+
+_SAME_BOX_VISIBLE_JS = f"""sig => {{ const vis = {_VISIBLE_JS};
+  return [...document.querySelectorAll('input')].some(el => vis(el)
+    && (el.getAttribute('name') || '') === sig[0] && (el.id || '') === sig[1]); }}"""
+
 # The code box's form's submit button, marked; false when there is none.
 _MARK_CODE_SUBMIT_JS = f"""el => {{ const b = el.form
     ? el.form.querySelector('button[type=submit], input[type=submit]') : null;
@@ -118,18 +140,39 @@ def _fail(msg: str, cred: creds.Credential, code: str | None = None) -> LoginFai
 
 # --- session state --------------------------------------------------------------------------
 
+def _is_ip(host: str) -> bool:
+    try:
+        ipaddress.ip_address(host.strip("[]"))
+    except ValueError:
+        return False
+    return True
+
+
 def _host_matches(cookie_domain: str, hosts: set[str]) -> bool:
+    """The cookie's domain is one of `hosts`, or a parent domain of one that has at least two
+    labels and is not a known multi-part public suffix. IP hosts match exactly only."""
     d = cookie_domain.lower().lstrip(".")
-    return bool(d) and any(h == d or h.endswith("." + d) for h in hosts)
+    if not d:
+        return False
+    for h in hosts:
+        if h == d:
+            return True
+        if (not _is_ip(h) and "." in d and d not in MULTI_PART_SUFFIXES
+                and h.endswith("." + d)):
+            return True
+    return False
 
 
 def filter_state(state: dict, hosts: set[str]) -> dict:
-    """Keep cookies whose domain is one of `hosts` or a parent domain of one, and origins
-    (localStorage) whose host is in `hosts`."""
+    """Keep cookies whose domain is one of `hosts` or a parent domain of one (see
+    _host_matches), and https origins (localStorage) whose host is in `hosts`."""
     hosts = {h.lower() for h in hosts}
     cookies = [c for c in state.get("cookies") or [] if _host_matches(c.get("domain", ""), hosts)]
-    origins = [o for o in state.get("origins") or []
-               if (urlsplit(o.get("origin", "")).hostname or "").lower() in hosts]
+    origins = []
+    for o in state.get("origins") or []:
+        parts = urlsplit(o.get("origin", ""))
+        if parts.scheme == "https" and (parts.hostname or "").lower() in hosts:
+            origins.append(o)
     return {"cookies": cookies, "origins": origins}
 
 
@@ -164,8 +207,9 @@ def save_state(session: Session, cred: creds.Credential, state: dict) -> None:
 def _guard(route) -> None:
     """Defence in depth on top of the proxy: only http(s) to allowed destinations."""
     parts = urlsplit(route.request.url)
-    if parts.scheme in ("data", "blob", "about") or parts.scheme in ("http", "https") and parts.hostname and destination_allowed(
-            parts.hostname):
+    if (parts.scheme in ("data", "blob", "about")
+            or (parts.scheme in ("http", "https") and parts.hostname
+                and destination_allowed(parts.hostname))):
         route.continue_()
     else:
         route.abort()
@@ -218,10 +262,24 @@ def _wait_visible(page, selector: str, timeout_s: float = 10.0):
     return loc
 
 
+def _on_allowed(url: str, hosts: set[str]) -> bool:
+    parts = urlsplit(url)
+    return parts.scheme == "https" and (parts.hostname or "").lower() in hosts
+
+
+def _check_where(page, cred: creds.Credential, box, button=None) -> None:
+    """Before typing a secret: the page and where its form submits must be https on a host
+    allowed for this login; otherwise nothing is typed."""
+    hosts = creds.allowed_hosts(cred)
+    targets = [page.url] + box.evaluate(_FORM_TARGETS_JS,
+                                        button.element_handle() if button is not None else None)
+    if not all(_on_allowed(u, hosts) for u in targets):
+        raise _fail(MOVED, cred)
+
+
 def _code_box(page, sel: dict):
     if sel.get("code"):
-        loc = page.locator(sel["code"]).first
-        return loc if loc.is_visible() else None
+        return _wait_visible(page, sel["code"], 2.0)
     if page.evaluate(_FIND_CODE_JS):
         return page.locator(f"[{MARK}=code]").first
     return None
@@ -297,16 +355,25 @@ def sign_in(cred: creds.Credential, code_provider: Callable[[], str | None] | No
         raise _fail("login failed: browser support not installed", cred) from None
     sel = cred.selectors or {}
     code: str | None = None
+    budget = {"deadline": time.monotonic() + SIGN_IN_BUDGET_S}
+
+    def left_ms() -> int:
+        left = budget["deadline"] - time.monotonic()
+        if left <= 0:
+            raise _fail("login failed: timed out", cred, code)
+        return int(min(left, TIMEOUT) * 1000)
+
     try:
         with browser_context() as context:
             page = context.new_page()
+            page.set_default_timeout(left_ms())
             page.route("**/*", _guard)
-            page.goto(url, timeout=int(TIMEOUT * 1000), wait_until="load")
-            _settle(page, 10.0)
+            page.goto(url, timeout=left_ms(), wait_until="load")
+            _settle(page, min(10.0, left_ms() / 1000))
 
             # The form: explicit selectors win, the rest is detected around the password box.
             if sel.get("password"):
-                pw = _wait_visible(page, sel["password"])
+                pw = _wait_visible(page, sel["password"], min(10.0, left_ms() / 1000))
                 if pw is None:
                     raise _fail("login failed: password box not found", cred)
             else:
@@ -315,44 +382,70 @@ def sign_in(cred: creds.Credential, code_provider: Callable[[], str | None] | No
                 pw = page.locator(f"[{MARK}=password]").first
             found = pw.evaluate(_MARK_REST_JS)
             if sel.get("username"):
-                user = _wait_visible(page, sel["username"])
+                user = _wait_visible(page, sel["username"], min(10.0, left_ms() / 1000))
             else:
                 user = page.locator(f"[{MARK}=username]").first if found["user"] else None
             if user is None:
                 raise _fail("login failed: username box not found", cred)
             if sel.get("submit"):
-                submit = _wait_visible(page, sel["submit"])
+                submit = _wait_visible(page, sel["submit"], min(10.0, left_ms() / 1000))
                 if submit is None:
                     raise _fail("login failed: submit button not found", cred)
             else:
                 submit = page.locator(f"[{MARK}=submit]").first if found["submit"] else None
 
+            _check_where(page, cred, pw, submit)
+            page.set_default_timeout(left_ms())
             user.fill(cred.username or "")
             pw.fill(cred.secret)
             _submit_and_wait(page, submit.click if submit is not None
                              else (lambda: pw.press("Enter")))
+            left_ms()
+
+            # A rejected password: still on the login page with a password box. Checked
+            # before code detection so an unrelated "promo code" box is not taken for one.
+            if (_host_path(page.url) == _host_path(url)
+                    and page.evaluate(_HAS_VISIBLE_PASSWORD_JS)):
+                raise _fail(STILL_ON_LOGIN, cred)
 
             box = _code_box(page, sel)
             if box is not None:
                 if code_provider is None:
                     raise LoginNeedsCode("the site asks for the emailed code")
-                deadline = time.monotonic() + timeout_s
-                while not (code := code_provider()):
+                waited_from = time.monotonic()
+                deadline = waited_from + timeout_s
+                while True:
+                    try:
+                        code = code_provider()
+                    except Exception:  # noqa: BLE001 - any provider failure
+                        raise _fail("could not read the code", cred) from None
+                    if code:
+                        break
                     left = deadline - time.monotonic()
                     if left <= 0:
                         raise _fail("timed out waiting for the code", cred)
                     time.sleep(min(CODE_POLL_S, left))
+                budget["deadline"] += time.monotonic() - waited_from  # the wait is not counted
+                code_page = _host_path(page.url)
+                sig = box.evaluate(_BOX_SIG_JS)
+                code_submit = (page.locator(f"[{MARK}=code-submit]").first
+                               if box.evaluate(_MARK_CODE_SUBMIT_JS) else None)
+                _check_where(page, cred, box, code_submit)
+                page.set_default_timeout(left_ms())
                 box.fill(code)
-                if box.evaluate(_MARK_CODE_SUBMIT_JS):
-                    action = page.locator(f"[{MARK}=code-submit]").first.click
-                else:
-                    action = lambda: box.press("Enter")
-                _submit_and_wait(page, action)
-                if _code_box(page, sel) is not None:
-                    raise _fail("code was not accepted", cred, code)
+                _submit_and_wait(page, code_submit.click if code_submit is not None
+                                 else (lambda: box.press("Enter")))
+                # Not accepted only if the same box is still there on the same page.
+                if _host_path(page.url) == code_page:
+                    if sel.get("code"):
+                        again = _wait_visible(page, sel["code"], 2.0) is not None
+                    else:
+                        again = bool(page.evaluate(_SAME_BOX_VISIBLE_JS, sig))
+                    if again:
+                        raise _fail("code was not accepted", cred, code)
 
             if _on_login_page(page, cred):
-                raise _fail("login failed: still on the login page", cred, code)
+                raise _fail(STILL_ON_LOGIN, cred, code)
             return filter_state(context.storage_state(), creds.allowed_hosts(cred))
     except (LoginNeedsCode, LoginFailed):
         raise

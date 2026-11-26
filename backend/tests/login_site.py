@@ -14,7 +14,13 @@ the browser is told to trust exactly that certificate's key (see `spki`). Pages:
 - GET /inline           protected content, else a login form in place (no redirect)
 - GET /echo             protected page that echoes the password (for redaction tests)
 - GET /pixel            sets the `tracker` cookie on whatever host served it
-`expire_all()` drops every session. `cookies_seen` records (host, Cookie header) per request.
+- GET /login-redirect   302 to /login on the second host name (127.0.0.1)
+- GET /login-offsite    a form whose action posts to the second host name
+- GET/POST /login-promo a form with an extra "promo code" box; bad logins re-render it here
+- GET /welcome          post-code landing page (when `pin_after_code`) with an unrelated
+                        "pin" search box
+`expire_all()` drops every session. `cookies_seen` records (host, Cookie header) per GET;
+`posts` records (host, path, body) per POST.
 """
 
 from __future__ import annotations
@@ -86,6 +92,24 @@ CUSTOM_FORM = """<html><body>
 {error}
 </body></html>"""
 
+OFFSITE_FORM = """<html><body>
+<form method="post" action="{action}">
+  <input type="email" name="email">
+  <input type="password" name="password">
+  <button type="submit">Sign in</button>
+</form>
+</body></html>"""
+
+PROMO_FORM = """<html><body>
+<form method="post" action="/login-promo">
+  <input type="email" name="email">
+  <input type="password" name="password">
+  <input type="text" name="promo_code" placeholder="Promo code">
+  <button type="submit">Sign in</button>
+</form>
+{error}
+</body></html>"""
+
 VERIFY_FORM = """<html><body>
 <p>We emailed you a code.</p>
 <form method="post" action="/verify">
@@ -102,6 +126,8 @@ class LoginSite:
         self.password = password
         self.code_file = code_file
         self.code_mode = False
+        self.pin_after_code = False
+        self.posts: list[tuple[str, str, str]] = []
         self.sessions: set[str] = set()
         self.pending: dict[str, str] = {}  # pending token -> code
         self.cookies_seen: list[tuple[str, str]] = []
@@ -176,6 +202,17 @@ class LoginSite:
                     self._send(200, CUSTOM_FORM.format(error=""))
                 elif path == "/verify":
                     self._send(200, VERIFY_FORM.format(error=""))
+                elif path == "/login-redirect":
+                    self._send(302, "", {"Location": site.url("/login", host="127.0.0.1")})
+                elif path == "/login-offsite":
+                    self._send(200, OFFSITE_FORM.format(
+                        action=site.url("/login", host="127.0.0.1")))
+                elif path == "/login-promo":
+                    self._send(200, PROMO_FORM.format(error=""))
+                elif path == "/welcome" and self._authed():
+                    self._send(200, f"<html><body><main>{PROTECTED}</main>"
+                                    '<input type="text" name="pin_search" placeholder="Find a PIN">'
+                                    "</body></html>")
                 elif path == "/pixel":
                     self._send(200, "", {"Set-Cookie":
                                          "tracker=t1; Path=/; Secure; SameSite=None"})
@@ -193,7 +230,19 @@ class LoginSite:
 
             def do_POST(self):
                 n = int(self.headers.get("Content-Length") or 0)
-                form = {k: v[0] for k, v in parse_qs(self.rfile.read(n).decode()).items()}
+                raw = self.rfile.read(n).decode()
+                host = (self.headers.get("Host") or "").split(":")[0]
+                site.posts.append((host, self.path, raw))
+                form = {k: v[0] for k, v in parse_qs(raw).items()}
+                if self.path == "/login-promo":
+                    ok = (form.get("email") == site.username
+                          and form.get("password") == site.password)
+                    if ok:
+                        self._send(303, "", {"Location": "/data",
+                                             "Set-Cookie": self._sign_in_cookie()})
+                    else:
+                        self._send(200, PROMO_FORM.format(error="<p>wrong password</p>"))
+                    return
                 if self.path == "/login":
                     if (form.get("email") != site.username
                             or form.get("password") != site.password):
@@ -214,7 +263,8 @@ class LoginSite:
                     token = self._cookies().get("pending", "")
                     if token in site.pending and form.get("otp") == site.pending[token]:
                         del site.pending[token]
-                        self._send(303, "", {"Location": "/data",
+                        landing = "/welcome" if site.pin_after_code else "/data"
+                        self._send(303, "", {"Location": landing,
                                              "Set-Cookie": self._sign_in_cookie()})
                     else:
                         self._send(200, VERIFY_FORM.format(

@@ -134,7 +134,7 @@ Additional environment variables:
 | `WATCH_ALLOWED_HOSTS` | empty | Comma-separated hosts exempt from the internal-address block (for example `127.0.0.1,localhost` for local testing) |
 | `KPI_SECRET_KEY` | empty | Encrypts stored keys; required to save or use keys (see Keys) |
 | `KPI_CHROMIUM_PATH` | empty | Chromium executable used for "needs a browser" KPIs; empty uses Playwright's own browser |
-| `KPI_TEST_TRUSTED_SPKI` | empty | **Tests only, never set it in production.** Base64 SHA-256 of one certificate's public key that the browser accepts without a CA; the login-engine tests (`tests/test_logins.py`) set it for their throwaway self-signed site. It trusts only that key, never "any certificate" |
+| `KPI_TEST_TRUSTED_SPKI` | empty | **Tests only, never set it in production.** Base64 SHA-256 of one certificate's public key that the browser accepts without a CA. Honoured only when `KPI_TESTING=1` is also set, and logs a warning when applied. The login-engine tests (`tests/test_logins.py`) set both for their throwaway self-signed site. It trusts only that key, never "any certificate" |
 
 ## Keys
 
