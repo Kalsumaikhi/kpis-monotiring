@@ -1,6 +1,6 @@
 import pytest
 from cryptography.fernet import Fernet
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 
 from app import credentials as creds
@@ -339,3 +339,15 @@ def test_login_host_409_lists_at_most_five(client, db_session):
     assert r.status_code == 409
     assert r.json()["kpis"] == ["K0", "K1", "K2", "K3", "K4"] and r.json()["more"] == 2
     assert r.json()["detail"].endswith("K0, K1, K2, K3, K4 +2 more")
+
+
+def test_stranded_check_runs_under_the_source_locks(client, db_session, held_lock):
+    """The stranded-KPI check reads the KPIs only once their sources are locked: while a
+    check runs, the edit is refused as busy before anything is decided."""
+    from app.models import Source
+    cid = client.post("/api/credentials", json=body()).json()["id"]
+    _targets(db_session, cid, [("On portal", "portal.example.com", True)])
+    held_lock(db_session.scalar(select(Source.id).where(Source.slug == "s-hosts")))
+    r = client.patch(f"/api/credentials/{cid}", json={"login_url": "https://new.example.com/login"})
+    assert r.status_code == 409 and "kpis" not in r.json()
+    assert r.json()["detail"].startswith("a check is running")

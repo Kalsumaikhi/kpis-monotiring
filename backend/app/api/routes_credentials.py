@@ -277,10 +277,6 @@ def patch_credential(cid: int, body: CredentialPatch, session: Session = Depends
             select(WatchTarget.id).where(WatchTarget.credential_id == cid).limit(1)) is not None:
         # Its KPIs are browser KPIs on the login's hosts; another kind cannot serve them.
         raise HTTPException(409, "this login is used by KPIs")
-    if row.kind == "login" and kind == "login":
-        stranded = _stranded_kpis(session, row, fields)
-        if stranded:
-            return _stranded_409(stranded)
     if row.kind != "login" and kind == "login" and _used_by(session, [cid]).get(cid):
         # Its KPIs and sources send it as a header/query/basic value; a login cannot.
         raise HTTPException(409, "this key is used by KPIs")
@@ -304,6 +300,11 @@ def patch_credential(cid: int, body: CredentialPatch, session: Session = Depends
             # The key was given to another source meanwhile; its lock is not held.
             session.rollback()
             raise HTTPException(409, BUSY_KEY)
+        if row.kind == "login" and kind == "login":
+            # Under the locks: no run of these sources is using the KPIs being checked.
+            stranded = _stranded_kpis(session, row, fields)
+            if stranded:  # nothing was changed yet; leaving the block releases the locks
+                return _stranded_409(stranded)
         _patch(session, row, cid, data, name, kind, fields, affected)
     session.refresh(row)
     return _json(row, _used_by(session, [cid]).get(cid), _fernet(),
