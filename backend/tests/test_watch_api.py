@@ -617,3 +617,57 @@ def test_import_preview_flags_duplicate_names_in_sheet(client):
                  ("Other", "price", "https://h.example/c")])
     st = [x["status"] for x in upload(client, "k.xlsx", data).json()["rows"]]
     assert st == ["new_source", "duplicate", "new_source"]
+
+
+# --- target PATCH/DELETE under the source lock (plan 3a task 5, item 2) -----------
+
+@pytest.mark.parametrize("call", ["rename", "disable", "delete"])
+def test_target_deleted_while_waiting_for_lock_is_404(client, db_session, monkeypatch, call):
+    """The target is gone by the time the lock is taken: 404, not 500."""
+    from contextlib import contextmanager
+
+    from sqlalchemy import delete as sa_delete
+
+    from app.api import routes_watch
+
+    tid = create(client).json()["id"]
+    real = routes_watch._source_lock
+
+    @contextmanager
+    def lock_then_vanish(session, source_id, *a, **k):
+        with real(session, source_id, *a, **k):
+            session.execute(sa_delete(WatchTarget).where(WatchTarget.id == tid)
+                            .execution_options(synchronize_session=False))  # as another request would
+            yield
+
+    monkeypatch.setattr(routes_watch, "_source_lock", lock_then_vanish)
+    if call == "delete":
+        r = client.delete(f"/api/watch-targets/{tid}")
+    else:
+        body = {"kpi_name": "New"} if call == "rename" else {"enabled": False}
+        r = client.patch(f"/api/watch-targets/{tid}", json=body)
+    assert r.status_code == 404 and r.json()["detail"] == "target not found"
+
+
+def test_patch_recomputes_from_the_row_read_under_the_lock(client, db_session, monkeypatch):
+    """A rename that lands while a disable waits for the lock is kept, not reverted."""
+    from contextlib import contextmanager
+
+    from sqlalchemy import update as sa_update
+
+    from app.api import routes_watch
+
+    tid = create(client).json()["id"]
+    real = routes_watch._source_lock
+
+    @contextmanager
+    def lock_after_rename(session, source_id, *a, **k):
+        with real(session, source_id, *a, **k):
+            session.execute(sa_update(WatchTarget).where(WatchTarget.id == tid)
+                            .values(kpi_name="Renamed")
+                            .execution_options(synchronize_session=False))
+            yield
+
+    monkeypatch.setattr(routes_watch, "_source_lock", lock_after_rename)
+    r = client.patch(f"/api/watch-targets/{tid}", json={"enabled": False})
+    assert r.status_code == 200 and r.json()["kpi_name"] == "Renamed" and r.json()["enabled"] is False

@@ -14,7 +14,7 @@ import httpx
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel, field_validator
 from sqlalchemy import delete, func, select, update
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, InvalidRequestError
 from sqlalchemy.orm import Session
 
 from app import watch_import
@@ -250,6 +250,15 @@ def _target_or_404(session: Session, target_id: int) -> WatchTarget:
     return t
 
 
+def _reload_target(session: Session, t: WatchTarget) -> None:
+    """Under the source lock: re-read the target (it may have changed while we waited);
+    404 when it was deleted meanwhile."""
+    try:
+        session.refresh(t)
+    except InvalidRequestError:  # the row is gone
+        raise HTTPException(404, "target not found") from None
+
+
 @router.delete("/custom-sources/{slug}", status_code=204)
 def delete_custom_source(slug: str, session: Session = Depends(get_session)):
     """Remove a custom source with all its rows and raw files. Silent: no Mattermost post.
@@ -281,12 +290,10 @@ def delete_custom_source(slug: str, session: Session = Depends(get_session)):
         shutil.rmtree(d, ignore_errors=True)
 
 
-@router.patch("/watch-targets/{target_id}")
-def patch_target(target_id: int, body: TargetPatch, session: Session = Depends(get_session)):
-    t = _target_or_404(session, target_id)
+def _plan_patch(session: Session, t: WatchTarget, body: TargetPatch) -> tuple[str, str, bool, bool]:
+    """(new name, new link, browser mode, needs the source lock) for `body` applied to `t`."""
     new_name = body.kpi_name if body.kpi_name is not None else t.kpi_name
     new_url = body.url if body.url is not None else t.url
-    renames, repoints = new_name != t.kpi_name, new_url != t.url
     new_key = body.credential_id if "credential_id" in body.model_fields_set else t.credential_id
     if body.use_browser is not None:
         wanted = body.use_browser
@@ -295,15 +302,23 @@ def patch_target(target_id: int, body: TargetPatch, session: Session = Depends(g
     else:
         wanted = t.use_browser
     use_browser = _check_key(session, new_key, new_url, wanted)
-    disables = body.enabled is False and t.enabled
     # A key change sets needs_baseline; under the lock no run can be fetching with the old key
     # (and clear the flag when it finishes), and a held run diffed with the old key is dropped.
-    rekeys = new_key != t.credential_id
-    if not (renames or repoints or disables or rekeys):
+    locked = (new_name != t.kpi_name or new_url != t.url or (body.enabled is False and t.enabled)
+              or new_key != t.credential_id)
+    return new_name, new_url, use_browser, locked
+
+
+@router.patch("/watch-targets/{target_id}")
+def patch_target(target_id: int, body: TargetPatch, session: Session = Depends(get_session)):
+    t = _target_or_404(session, target_id)
+    new_name, new_url, use_browser, locked = _plan_patch(session, t, body)
+    if not locked:
         _apply_patch(session, t, body, new_name, new_url, use_browser)
         return _target_json(t, key_name=_key_name(session, t.credential_id))
     with _source_lock(session, t.source_id):
-        session.refresh(t)  # state may have changed while waiting
+        _reload_target(session, t)  # state may have changed while waiting: plan again from it
+        new_name, new_url, use_browser, _ = _plan_patch(session, t, body)
         _apply_patch(session, t, body, new_name, new_url, use_browser, supersede=True)
     return _target_json(t, key_name=_key_name(session, t.credential_id))
 
@@ -367,7 +382,7 @@ def _apply_patch(session: Session, t: WatchTarget, body: TargetPatch, new_name: 
 def delete_target(target_id: int, session: Session = Depends(get_session)):
     t = _target_or_404(session, target_id)
     with _source_lock(session, t.source_id):
-        session.refresh(t)
+        _reload_target(session, t)
         _delete_points(session, t.source_id, t.kpi_name)
         session.execute(delete(Indicator).where(
             Indicator.source_id == t.source_id, Indicator.code == t.kpi_name))
