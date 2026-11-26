@@ -65,6 +65,9 @@ class Credential:
     param_name: str | None
     username: str | None
     secret: str = field(repr=False)
+    login_url: str | None = None
+    selectors: dict | None = None
+    extra_hosts: list | None = None
 
 
 def load(session: Session, credential_id: int) -> Credential:
@@ -72,7 +75,17 @@ def load(session: Session, credential_id: int) -> Credential:
     if row is None:
         raise KeyError(credential_id)
     return Credential(row.id, row.name, row.kind, row.header_name, row.prefix,
-                      row.param_name, row.username, decrypt(row.secret_enc))
+                      row.param_name, row.username, decrypt(row.secret_enc),
+                      row.login_url, row.selectors, row.extra_hosts)
+
+
+def allowed_hosts(cred: Credential) -> set[str]:
+    """Hosts a login may be used on: the login page's host plus extra_hosts, lowercased."""
+    hosts = {h.lower() for h in (cred.extra_hosts or [])}
+    host = urlsplit(cred.login_url).hostname if cred.login_url else None
+    if host:
+        hosts.add(host.lower())
+    return hosts
 
 
 def _basic_token(cred: Credential) -> str:
