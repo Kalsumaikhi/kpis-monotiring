@@ -9,7 +9,8 @@
     "preview": "vite preview",
     "test": "vitest run",
     "e2e": "node tests/e2e/smoke.mjs",
-    "e2e:keys": "node tests/e2e/keys.mjs"
+    "e2e:keys": "node tests/e2e/keys.mjs",
+    "e2e:logins": "node tests/e2e/logins.mjs"
   },
   "dependencies": {
     "chart.js": "4.4.9",
