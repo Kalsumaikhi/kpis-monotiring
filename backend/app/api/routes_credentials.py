@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from contextlib import ExitStack
+from types import SimpleNamespace
 from typing import Any, Literal
 from urllib.parse import urlsplit
 
@@ -276,6 +277,10 @@ def patch_credential(cid: int, body: CredentialPatch, session: Session = Depends
             select(WatchTarget.id).where(WatchTarget.credential_id == cid).limit(1)) is not None:
         # Its KPIs are browser KPIs on the login's hosts; another kind cannot serve them.
         raise HTTPException(409, "this login is used by KPIs")
+    if row.kind == "login" and kind == "login":
+        stranded = _stranded_kpis(session, row, fields)
+        if stranded:
+            return _stranded_409(stranded)
     if row.kind != "login" and kind == "login" and _used_by(session, [cid]).get(cid):
         # Its KPIs and sources send it as a header/query/basic value; a login cannot.
         raise HTTPException(409, "this key is used by KPIs")
@@ -373,6 +378,29 @@ def _patch(session: Session, row: Credential, cid: int, data: dict, name: str, k
     except IntegrityError:
         session.rollback()
         raise HTTPException(409, "a key with this name already exists") from None
+
+
+MAX_LISTED = 5
+STRANDED = "this change takes away a host that enabled KPIs use: "
+
+
+def _stranded_kpis(session: Session, row: Credential, fields: dict) -> list[str]:
+    """Names of enabled KPIs of the login `row` whose host it covers now but would not with
+    `fields` (a new login page host, or a host removed from "Also used on")."""
+    if (fields["login_url"], fields["extra_hosts"]) == (row.login_url, row.extra_hosts):
+        return []
+    new = SimpleNamespace(login_url=fields["login_url"], extra_hosts=fields["extra_hosts"])
+    return [name for name, url in session.execute(
+        select(WatchTarget.kpi_name, WatchTarget.url)
+        .where(WatchTarget.credential_id == row.id, WatchTarget.enabled.is_(True))
+        .order_by(WatchTarget.id))
+        if creds.login_host_error(row, url) is None and creds.login_host_error(new, url)]
+
+
+def _stranded_409(names: list[str]) -> JSONResponse:
+    shown, more = names[:MAX_LISTED], max(0, len(names) - MAX_LISTED)
+    detail = STRANDED + ", ".join(shown) + (f" +{more} more" if more else "")
+    return JSONResponse({"detail": detail, "kpis": shown, "more": more}, status_code=409)
 
 
 @router.delete("/credentials/{cid}", status_code=204)

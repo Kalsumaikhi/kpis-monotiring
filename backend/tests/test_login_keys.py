@@ -295,3 +295,47 @@ def test_migration_0009_downgrade_and_upgrade(db_engine):
         e.dispose()
         with db_engine.connect().execution_options(isolation_level="AUTOCOMMIT") as c:
             c.execute(text(f"DROP DATABASE IF EXISTS {name} WITH (FORCE)"))
+
+
+# --- login edits with dependants (plan 3a task 5, item 3) -------------------------
+
+def _targets(db_session, cid, specs):
+    from app.models import Source, WatchTarget
+    src = Source(slug="s-hosts", name="S", area="custom", access="watch")
+    db_session.add(src)
+    db_session.flush()
+    for i, (name, host, enabled) in enumerate(specs):
+        db_session.add(WatchTarget(source_id=src.id, kpi_name=name, url=f"https://{host}/p{i}",
+                                   use_browser=True, enabled=enabled, credential_id=cid))
+    db_session.flush()
+
+
+def test_login_host_change_with_dependant_kpis_409(client, db_session):
+    cid = client.post("/api/credentials", json=body(extra_hosts=["app.example.com"])).json()["id"]
+    _targets(db_session, cid, [("On portal", "portal.example.com", True),
+                               ("On app", "app.example.com", True),
+                               ("Off", "old.example.com", False)])
+    r = client.patch(f"/api/credentials/{cid}", json={"login_url": "https://new.example.com/login"})
+    assert r.status_code == 409
+    assert r.json()["kpis"] == ["On portal"]
+    assert "On portal" in r.json()["detail"]
+    r = client.patch(f"/api/credentials/{cid}", json={"extra_hosts": []})
+    assert r.status_code == 409 and r.json()["kpis"] == ["On app"]
+    # nothing was saved
+    item = next(k for k in client.get("/api/credentials").json() if k["id"] == cid)
+    assert item["login_url"] == "https://Portal.example.com/login"
+    assert item["extra_hosts"] == ["app.example.com"]
+    # edits that keep every enabled KPI's host are fine (a disabled KPI does not block)
+    assert client.patch(f"/api/credentials/{cid}",
+                        json={"extra_hosts": ["app.example.com", "more.example.com"]}).status_code == 200
+    assert client.patch(f"/api/credentials/{cid}",
+                        json={"login_url": "https://PORTAL.example.com/signin"}).status_code == 200
+
+
+def test_login_host_409_lists_at_most_five(client, db_session):
+    cid = client.post("/api/credentials", json=body()).json()["id"]
+    _targets(db_session, cid, [(f"K{i}", "portal.example.com", True) for i in range(7)])
+    r = client.patch(f"/api/credentials/{cid}", json={"login_url": "https://x.example.com/l"})
+    assert r.status_code == 409
+    assert r.json()["kpis"] == ["K0", "K1", "K2", "K3", "K4"] and r.json()["more"] == 2
+    assert r.json()["detail"].endswith("K0, K1, K2, K3, K4 +2 more")
