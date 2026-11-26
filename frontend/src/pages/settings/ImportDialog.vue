@@ -171,6 +171,12 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onKey, true))
         <div v-if="result" role="status" class="done">
           <strong>Import finished.</strong>
           Created {{ result.created_targets }} KPIs in {{ result.created_sources }} new sources; {{ result.skipped }} skipped.
+          <template v-if="result.skipped_rows?.length">
+            <p class="small">Changed since the preview, so not imported:</p>
+            <ul class="small" data-test="skipped-rows">
+              <li v-for="s in result.skipped_rows" :key="`${s.row}-${s.kpi_name}`">Row {{ s.row }} ({{ s.source_name }} / {{ s.kpi_name }}): {{ s.reason }}</li>
+            </ul>
+          </template>
           <p class="muted small">New KPIs are checked silently the first time — you'll be alerted from the second change on.</p>
         </div>
 

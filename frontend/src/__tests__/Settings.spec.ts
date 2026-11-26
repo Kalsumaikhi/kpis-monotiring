@@ -127,6 +127,26 @@ describe('ImportDialog', () => {
     w.unmount()
   })
 
+  it('after import, lists rows skipped because something changed since the preview', async () => {
+    apiUpload.mockResolvedValue({ token: 'tok9', rows: [rows[0]] })
+    apiSend.mockResolvedValue({
+      created_sources: 0, created_targets: 0, skipped: 1,
+      skipped_rows: [{ row: 2, source_name: 'Acme', kpi_name: 'A', reason: 'a KPI with this name already exists in this source' }],
+    })
+    const w = mount(ImportDialog, { props: { open: true }, attachTo: document.body })
+    const input = document.body.querySelector('input[type=file]') as HTMLInputElement
+    Object.defineProperty(input, 'files', { value: [new File(['x'], 'k.csv')] })
+    input.dispatchEvent(new Event('change'))
+    await flushPromises()
+    ;(Array.from(document.body.querySelectorAll('button')).find((b) => /^Import 1 KPIs$/.test(b.textContent!.trim())) as HTMLElement).click()
+    await flushPromises()
+    const item = document.body.querySelector('[data-test=skipped-rows] li')
+    expect(item?.textContent).toContain('Row 2')
+    expect(item?.textContent).toContain('A')
+    expect(item?.textContent).toContain('a KPI with this name already exists in this source')
+    w.unmount()
+  })
+
   it('shows expired message on 410', async () => {
     apiUpload.mockResolvedValue({ token: 't', rows: [rows[0]] })
     apiSend.mockRejectedValue(new ApiError(410, 'import preview expired'))

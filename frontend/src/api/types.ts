@@ -207,7 +207,14 @@ export interface ImportRow {
   error?: string
 }
 export interface ImportPreview { token: string; rows: ImportRow[] }
-export interface ImportConfirmResult { created_sources: number; created_targets: number; skipped: number }
+export interface ImportSkippedRow { row: number | null; source_name: string; kpi_name: string; reason: string }
+export interface ImportConfirmResult {
+  created_sources: number
+  created_targets: number
+  skipped: number
+  // Rows that could not be imported because something changed since the preview, with the reason.
+  skipped_rows?: ImportSkippedRow[]
+}
 
 // Stored keys: GET/POST/PATCH/DELETE /api/credentials. The secret is write-only and never returned.
 export type KeyKind = 'header' | 'query' | 'basic' | 'login'

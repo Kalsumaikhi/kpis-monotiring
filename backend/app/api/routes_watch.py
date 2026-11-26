@@ -531,24 +531,38 @@ def import_confirm(body: ConfirmIn, session: Session = Depends(get_session)):
 
 
 def _confirm_rows(session: Session, rows: list[dict]) -> dict:
+    """Create the importable rows. Rows the preview showed as duplicate or invalid are
+    skipped silently (the preview said why); a row that can no longer be imported because
+    something changed since the preview is skipped with its reason in `skipped_rows`."""
     created_sources = created_targets = skipped = 0
+    skipped_rows: list[dict] = []
     known_keys = {row.id: row for row in session.scalars(select(Credential))}
+
+    def skip(r: dict, reason: str) -> None:
+        skipped_rows.append({"row": r.get("row"), "source_name": r["source_name"],
+                             "kpi_name": r["kpi_name"], "reason": reason})
+
     for r in rows:
         if r["status"] not in ("new_source", "existing_source"):
             skipped += 1
             continue
         cid = r.get("credential_id")
         if cid is not None and cid not in known_keys:
-            skipped += 1  # key deleted since the preview
+            skipped += 1
+            skip(r, "the key was deleted since the preview")
             continue
         # The key may have changed since the preview: decide browser mode and hosts now.
         use_browser = cid is not None and known_keys[cid].kind == "login"
-        if use_browser and creds.login_host_error(known_keys[cid], r["url"]):
+        host_err = creds.login_host_error(known_keys[cid], r["url"]) if use_browser else None
+        if host_err:
             skipped += 1
+            skip(r, host_err)
             continue
         source = _find_source(session, r["source_name"])
-        if source is not None and _conflict(session, source.id, r["kpi_name"], r["url"]):
+        msg = _conflict(session, source.id, r["kpi_name"], r["url"]) if source is not None else None
+        if msg:
             skipped += 1  # created since the preview
+            skip(r, msg)
             continue
         if source is None:
             source = _new_source(session, r["source_name"])
@@ -558,4 +572,4 @@ def _confirm_rows(session: Session, rows: list[dict]) -> dict:
         created_targets += 1
     session.commit()
     return {"created_sources": created_sources, "created_targets": created_targets,
-            "skipped": skipped}
+            "skipped": skipped, "skipped_rows": skipped_rows}

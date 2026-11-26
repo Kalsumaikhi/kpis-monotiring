@@ -323,7 +323,7 @@ def test_import_confirm_creates_and_token_single_use(client, db_session):
     tok = upload(client, "k.xlsx", data).json()["token"]
     r = client.post("/api/watch-targets/import/confirm", json={"token": tok})
     assert r.status_code == 200
-    assert r.json() == {"created_sources": 1, "created_targets": 3, "skipped": 2}
+    assert r.json() == {"created_sources": 1, "created_targets": 3, "skipped": 2, "skipped_rows": []}
     assert db_session.scalars(select(Source).where(Source.slug == "custom-fresh")).one()
     assert client.post("/api/watch-targets/import/confirm", json={"token": tok}).status_code == 410
     assert client.post("/api/watch-targets/import/confirm", json={"token": "nope"}).status_code == 410
@@ -671,3 +671,22 @@ def test_patch_recomputes_from_the_row_read_under_the_lock(client, db_session, m
     monkeypatch.setattr(routes_watch, "_source_lock", lock_after_rename)
     r = client.patch(f"/api/watch-targets/{tid}", json={"enabled": False})
     assert r.status_code == 200 and r.json()["kpi_name"] == "Renamed" and r.json()["enabled"] is False
+
+
+def test_import_confirm_says_why_a_row_was_skipped(client):
+    """Rows that became duplicates after the preview are skipped with a reason, per row."""
+    create(client)  # Acme / Price / https://h.example/p
+    data = xlsx([("Acme", "Fresh", "https://h.example/f"), ("Acme", "Linky", "https://h.example/l"),
+                 ("Acme", "Fine", "https://h.example/fine"), ("Acme", "Price", "https://h.example/z")])
+    tok = upload(client, "k.xlsx", data).json()["token"]
+    create(client, kpi="FRESH", url="https://h.example/f2")  # name taken since the preview
+    create(client, kpi="Other", url="https://h.example/l")  # link taken since the preview
+    r = client.post("/api/watch-targets/import/confirm", json={"token": tok})
+    assert r.status_code == 200
+    out = r.json()
+    assert (out["created_targets"], out["skipped"]) == (1, 3)
+    assert out["skipped_rows"] == [
+        {"row": 2, "source_name": "Acme", "kpi_name": "Fresh", "reason": NAME_TAKEN},
+        {"row": 3, "source_name": "Acme", "kpi_name": "Linky",
+         "reason": "a KPI with this link already exists"},
+    ]  # row 5 was already a duplicate in the preview, which said so
