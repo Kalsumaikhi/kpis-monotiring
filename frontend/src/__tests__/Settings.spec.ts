@@ -178,6 +178,42 @@ describe('CustomSources', () => {
     w.unmount()
   })
 
+  const dialogBtn = (label: string) =>
+    Array.from(document.body.querySelectorAll('.dialog button')).find((b) => b.textContent!.trim() === label) as HTMLElement
+
+  it('delete source asks confirmation naming what goes and what stays, then deletes', async () => {
+    apiGet.mockResolvedValue(custom())
+    apiSend.mockResolvedValue(null)
+    const w = mount(CustomSources, { attachTo: document.body })
+    await flushPromises()
+    await w.get('[data-test=delete-source-custom-acme]').trigger('click')
+    expect(document.body.textContent).toContain('Delete Acme? Its KPIs, history and change records are removed. Keys and logins are kept.')
+    expect(apiSend).not.toHaveBeenCalled()
+    dialogBtn('Delete source').click()
+    await flushPromises()
+    expect(apiSend).toHaveBeenCalledWith('DELETE', '/api/custom-sources/custom-acme')
+    expect(toasts.value.some((t) => t.message.includes('Acme deleted'))).toBe(true)
+    expect(apiGet).toHaveBeenCalledTimes(2)
+    w.unmount()
+  })
+
+  it('delete source cancel sends nothing; a 409 is shown inline', async () => {
+    apiGet.mockResolvedValue(custom())
+    const w = mount(CustomSources, { attachTo: document.body })
+    await flushPromises()
+    await w.get('[data-test=delete-source-custom-acme]').trigger('click')
+    dialogBtn('Cancel').click()
+    await flushPromises()
+    expect(apiSend).not.toHaveBeenCalled()
+    apiSend.mockRejectedValue(new ApiError(409, 'a check is running for this source; try again when it finishes'))
+    await w.get('[data-test=delete-source-custom-acme]').trigger('click')
+    dialogBtn('Delete source').click()
+    await flushPromises()
+    expect(w.get('[data-test=source-error-custom-acme]').text()).toContain('a check is running for this source')
+    expect(w.find('[data-test=delete-source-custom-acme]').exists()).toBe(true)
+    w.unmount()
+  })
+
   it('noisy chip opens edit form with advanced open', async () => {
     apiGet.mockResolvedValue(custom([target({ noisy: true })]))
     const w = mount(CustomSources, { attachTo: document.body })

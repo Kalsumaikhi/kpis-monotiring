@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import re
 import secrets
+import shutil
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
 
@@ -29,7 +31,11 @@ from app import logins
 from app.connectors.watch.fetch import (
     NEEDS_HTTPS, NO_BROWSER_KEY, FetchState, fetch_target, preflight,
 )
-from app.models import Credential, DataPoint, ImportPreview, Indicator, Source, WatchTarget
+from app.config import get_settings
+from app.models import (
+    Change, ChangeRollup, Credential, DataPoint, ImportPreview, Indicator, PendingChange, Run,
+    Source, Upload, WatchTarget,
+)
 
 router = APIRouter()
 
@@ -234,17 +240,43 @@ def _target_or_404(session: Session, target_id: int) -> WatchTarget:
 
 
 @contextmanager
-def _source_lock(session: Session, source_id: int):
+def _source_lock(session: Session, source_id: int, busy: str = "source is running, try again"):
     """Non-blocking per-source advisory lock (same as run_source); 409 while a run holds it."""
     try:
         release = _acquire_source_lock(session, source_id)
     except SourceBusyError:
         session.rollback()
-        raise HTTPException(409, "source is running, try again") from None
+        raise HTTPException(409, busy) from None
     try:
         yield
     finally:
         release()
+
+
+@router.delete("/custom-sources/{slug}", status_code=204)
+def delete_custom_source(slug: str, session: Session = Depends(get_session)):
+    """Remove a custom source with all its rows and raw files. Silent: no Mattermost post.
+    Keys and logins are shared and stay."""
+    src = session.scalar(select(Source).where(
+        Source.slug == slug, Source.access == "watch", Source.area == "custom"))
+    if src is None:
+        raise HTTPException(404, "custom source not found")
+    sid = src.id
+    with _source_lock(session, sid, "a check is running for this source; try again when it finishes"):
+        if session.scalar(select(Source.id).where(Source.id == sid)) is None:
+            raise HTTPException(404, "custom source not found")  # deleted while we waited
+        raw_files = [p for p in session.scalars(
+            select(Run.raw_path).where(Run.source_id == sid, Run.raw_path.is_not(None)))]
+        # Tables without ON DELETE CASCADE go by hand, children of runs first.
+        for model in (Change, PendingChange, Upload, DataPoint, Indicator, ChangeRollup):
+            session.execute(delete(model).where(model.source_id == sid))
+        session.execute(delete(WatchTarget).where(WatchTarget.source_id == sid))  # snapshots cascade
+        session.execute(delete(Run).where(Run.source_id == sid))
+        session.execute(delete(Source).where(Source.id == sid))
+        session.commit()
+    for f in raw_files:
+        Path(f).unlink(missing_ok=True)
+    shutil.rmtree(Path(get_settings().raw_dir) / slug, ignore_errors=True)
 
 
 @router.patch("/watch-targets/{target_id}")

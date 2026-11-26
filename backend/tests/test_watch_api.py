@@ -6,7 +6,7 @@ import openpyxl
 import pytest
 import respx
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app import watch_import
 from app.api import deps
@@ -14,7 +14,7 @@ from app.api.main import create_app
 from app.config import get_settings
 from app.connectors.watch import fetch as fetch_mod
 from app.core import pipeline
-from app.models import Change, DataPoint, ImportPreview, Indicator, Run, Source, WatchTarget
+from app.models import Change, DataPoint, ImportPreview, Indicator, Run, Source, WatchSnapshot, WatchTarget
 
 AUTH = ("anyone", "secret")
 
@@ -121,6 +121,88 @@ def test_delete_target_no_removed_changes(client, db_session, session_factory):
     assert pts == ["Two"]
     assert db_session.scalars(select(Change)).all() == []
     assert client.delete(f"/api/watch-targets/{tid}").status_code == 404
+
+
+def _seed_source_rows(db_session, slug):
+    """Rows in every table that points at the source, plus a raw file on disk."""
+    from pathlib import Path
+    from app.models import ChangeRollup, PendingChange, Upload, WatchSnapshot
+    src = db_session.scalar(select(Source).where(Source.slug == slug))
+    run = Run(source_id=src.id, status="ok")
+    db_session.add(run)
+    db_session.flush()
+    raw = Path(get_settings().raw_dir) / slug / f"{run.id}.json"
+    raw.parent.mkdir(parents=True, exist_ok=True)
+    raw.write_text("{}")
+    run.raw_path = str(raw)
+    tid = db_session.scalar(select(WatchTarget.id).where(WatchTarget.source_id == src.id))
+    db_session.add_all([
+        Change(run_id=run.id, source_id=src.id, key_hash="a" * 40, change_type="altered",
+               dataset="page", indicator="Price", country="", period="p"),
+        PendingChange(run_id=run.id, source_id=src.id, key_hash="b" * 40, change_type="added",
+                      dataset="page", indicator="Price", country="", period="p"),
+        DataPoint(source_id=src.id, key_hash="c" * 40, dataset="page", indicator="Price", value_hash="e" * 40,
+                  country="", period="p"),
+        Indicator(source_id=src.id, code="Price", name="Price"),
+        ChangeRollup(source_id=src.id, indicator="Price", day=datetime.now().date(), altered=1),
+        Upload(source_id=src.id, who="x", filename="f", run_id=run.id),
+        WatchSnapshot(target_id=tid, run_id=run.id, content="x", content_hash="d" * 64,
+                      changed=False),
+    ])
+    db_session.commit()
+    return src, raw
+
+
+def _counts(db_session, source_id):
+    from app.models import ChangeRollup, PendingChange, Upload, WatchSnapshot
+    out = {}
+    for m in (Run, Change, PendingChange, DataPoint, Indicator, ChangeRollup, Upload, WatchTarget):
+        out[m.__tablename__] = db_session.scalar(
+            select(func.count()).select_from(m).where(m.source_id == source_id))
+    return out
+
+
+def test_delete_custom_source_removes_everything(client, db_session):
+    create(client)
+    create(client, source="Other", url="https://h.example/o")
+    acme, raw = _seed_source_rows(db_session, "custom-acme")
+    other, other_raw = _seed_source_rows(db_session, "custom-other")
+    before_other = _counts(db_session, other.id)
+    assert all(before_other.values()) and raw.exists()
+    assert client.delete("/api/custom-sources/custom-acme").status_code == 204
+    assert db_session.scalar(select(Source).where(Source.slug == "custom-acme")) is None
+    assert not raw.exists()
+    assert all(v == 0 for v in _counts(db_session, acme.id).values())
+    assert db_session.scalar(select(func.count()).select_from(WatchSnapshot)) == 1
+    assert _counts(db_session, other.id) == before_other
+    assert other_raw.exists()
+    assert client.delete("/api/custom-sources/custom-acme").status_code == 404
+
+
+def test_delete_custom_source_refuses_builtin(client, db_session):
+    db_session.add(Source(slug="wdi", name="WDI", area="economic", access="api"))
+    db_session.commit()
+    assert client.delete("/api/custom-sources/wdi").status_code == 404
+    assert client.delete("/api/custom-sources/nope").status_code == 404
+    assert db_session.scalar(select(Source).where(Source.slug == "wdi")) is not None
+
+
+def test_delete_custom_source_409_while_locked(client, db_session, held_lock):
+    create(client)
+    sid = db_session.scalar(select(Source.id).where(Source.slug == "custom-acme"))
+    held_lock(sid)
+    r = client.delete("/api/custom-sources/custom-acme")
+    assert r.status_code == 409
+    assert r.json()["detail"] == "a check is running for this source; try again when it finishes"
+    assert db_session.scalar(select(Source).where(Source.slug == "custom-acme")) is not None
+
+
+def test_delete_custom_source_silent(client, db_session):
+    create(client)
+    _seed_source_rows(db_session, "custom-acme")
+    with respx.mock(assert_all_called=False) as m:
+        assert client.delete("/api/custom-sources/custom-acme").status_code == 204
+        assert len(m.calls) == 0
 
 
 def test_delete_last_target_keeps_source(client, db_session):
