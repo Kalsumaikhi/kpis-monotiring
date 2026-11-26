@@ -385,7 +385,8 @@ def test_code_required_marks_login_needed_incomplete(wenv, db_session, monkeypat
     assert row.last_error == "the site asks for the emailed code"
     assert row.notified_at is not None
     assert stored_state(db_session, c.id)["cookies"][0]["value"] == "s1"  # session kept
-    assert rec.extras[0]["login_needed"] == [{"login_name": "Portal", "source": "Watch"}]
+    assert rec.extras[0]["login_needed"] == [{"login_name": "Portal", "source": "Watch",
+                                              "credential_id": c.id}]
     assert rec.messages[-1].endswith(ALERT)
 
 
@@ -450,7 +451,8 @@ def test_no_auto_sign_in_after_code_or_failure(wenv, db_session, monkeypatch):
     c = mk_login(db_session, status="login_needed", state=sid_state("old"))
     with sf() as s:
         s.execute(update(LoginSession).where(LoginSession.credential_id == c.id)
-                  .values(last_error="login failed: still on the login page"))
+                  .values(last_error="login failed: still on the login page",
+                          notified_at=func.now()))  # alerted when it failed
         s.commit()
     add_target(db_session, src, c, "https://portal.example/a", "A")
     add_target(db_session, src, c, "https://portal.example/b", "B")

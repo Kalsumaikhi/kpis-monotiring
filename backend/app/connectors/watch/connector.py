@@ -117,6 +117,9 @@ class _Login:
     tried: bool = False  # automatic sign-in already tried this run
     dead: str | None = None  # sign-in failed: no further browser work this run
     fetched_ok: bool = False
+    signed_in: bool = False  # an automatic sign-in succeeded this run
+    still_login: bool = False  # ... yet a page fetched after it still showed the login form
+    realert: bool = False  # login_needed after a failure, but the alert was never delivered
 
 
 def _api_text(data: Any) -> str:
@@ -134,6 +137,7 @@ class WatchConnector:
         self.name = name
         self.session_factory = session_factory
         self._alerts: list[dict] = []  # logins this run moved into login_needed (see notify_extras)
+        self._handed: list[dict] = []  # alerts handed to the notifier (see notify_failed)
 
     def download(self, client: httpx.Client, dest: Path) -> None:
         with self.session_factory() as session:  # short session, closed before any network I/O
@@ -209,11 +213,26 @@ class WatchConnector:
         """For the pipeline's notifier: the logins this run moved into login_needed (and
         claimed the alert for). Handed out once."""
         alerts, self._alerts = self._alerts, []
+        self._handed = alerts
         return {"login_needed": alerts} if alerts else {}
 
+    def notify_failed(self, session, run) -> None:
+        """The run's message was not delivered: un-claim its login-needed alerts, so the next
+        run that finds those logins still needing a sign-in alerts again."""
+        alerts, self._alerts, self._handed = self._alerts + self._handed, [], []
+        ids = {a["credential_id"] for a in alerts}
+        if not ids:
+            return
+        session.execute(
+            update(LoginSession)
+            .where(LoginSession.credential_id.in_(ids), LoginSession.status == "login_needed")
+            .values(notified_at=None, updated_at=LoginSession.updated_at))
+        session.commit()
+
     def _alert(self, cred: creds.Credential) -> None:
-        if not any(a["login_name"] == cred.name for a in self._alerts):
-            self._alerts.append({"login_name": cred.name, "source": self.name})
+        if not any(a["credential_id"] == cred.id for a in self._alerts):
+            self._alerts.append({"login_name": cred.name, "source": self.name,
+                                 "credential_id": cred.id})
 
     @staticmethod
     def _auto_ok(row) -> bool:
@@ -222,6 +241,13 @@ class WatchConnector:
         failed: no code email every run, no lockout from repeated bad passwords. The user
         recovers with "Sign in now" or by editing the key (which resets it)."""
         return row.status == "ok" or (row.status == "login_needed" and row.last_error is None)
+
+    @staticmethod
+    def _realert(row) -> bool:
+        """Needs the user (no automatic sign-in) but no alert went out: the last one could
+        not be delivered (notify_failed)."""
+        return (row.status == "login_needed" and row.last_error is not None
+                and row.notified_at is None)
 
     @staticmethod
     def _version(row) -> tuple:
@@ -238,7 +264,7 @@ class WatchConnector:
         if row.status in INTERACTIVE:
             return _Login(cred, None, self._version(row), skip=True)
         return _Login(cred, logins.load_state(session, cred), self._version(row),
-                      auto_ok=self._auto_ok(row))
+                      auto_ok=self._auto_ok(row), realert=self._realert(row))
 
     def _reload(self, lg: _Login) -> None:
         """The session changed under us (reset, or saved by another run): take the stored one."""
@@ -249,6 +275,7 @@ class WatchConnector:
                 return
             lg.version = self._version(row)
             lg.auto_ok = self._auto_ok(row)
+            lg.realert = self._realert(row)
             lg.state = logins.load_state(session, lg.cred)
 
     def _cas(self, lg: _Login, values: dict, into_login_needed: bool = False,
@@ -333,6 +360,7 @@ class WatchConnector:
         else:
             lg.state = new_state
             self._save_ok(lg)
+            lg.signed_in = True
             return True
         lg.dead = creds.redact(error, cred)[:500]
         self._mark_login_needed(lg, lg.dead, was=was)
@@ -356,6 +384,10 @@ class WatchConnector:
         if expired and not lg.tried:
             lg.tried = True
             if not lg.auto_ok:  # already needs the user: no automatic retry (R-a)
+                if lg.realert:  # ... and was never told: alert now (once)
+                    lg.realert = False
+                    if self._cas(lg, {}, into_login_needed=True):
+                        self._alert(cred)
                 lg.skip = True
                 return _entry(t, "login_needed", error=logins.LOGIN_NEEDED)
             if not self._sign_in(lg, state):
@@ -365,8 +397,9 @@ class WatchConnector:
             state.throttle(urlsplit(url).netloc)
             res, new_state, expired = logins.browser_fetch(url, cred, lg.state, t["kind"])
         if expired or res.status == "login_needed":
-            # Never the login page as content. After a fresh sign-in this is the page's own
-            # problem, so only this KPI is marked.
+            # Never the login page as content. After a fresh sign-in this KPI is marked; if
+            # no KPI of the login fetches ok, _finish_login marks the login itself.
+            lg.still_login = lg.still_login or lg.signed_in
             return _entry(t, "login_needed", error=logins.LOGIN_NEEDED)
         if res.status == "ok":
             lg.state, lg.fetched_ok = new_state, True
@@ -376,10 +409,17 @@ class WatchConnector:
         return entry
 
     def _finish_login(self, lg: _Login) -> None:
-        """Save the refreshed session (cookies may rotate) after successful fetches."""
-        if lg.skip or lg.dead or not lg.fetched_ok:
+        """Save the refreshed session (cookies may rotate) after successful fetches. A sign-in
+        that 'worked' while every page still showed the login form marks the login
+        login_needed: no automatic retry every run (R-a), and one alert."""
+        if lg.skip or lg.dead:
             return
-        self._save_ok(lg)
+        if lg.signed_in and lg.still_login and not lg.fetched_ok:
+            lg.dead = logins.SIGNED_IN_STILL_LOGIN
+            self._mark_login_needed(lg, lg.dead)
+            return
+        if lg.fetched_ok:
+            self._save_ok(lg)
 
     def parse(self, raw: Path) -> ParseResult:
         targets = json.loads(Path(raw).read_text(encoding="utf-8"))["targets"]

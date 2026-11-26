@@ -212,6 +212,14 @@ def _get(session: Session, cid: int) -> Credential:
     return row
 
 
+def _cancel_attempts(session: Session, cid: int) -> None:
+    """Cancel the login's active sign-in (the worker never overwrites a cancelled one)."""
+    session.execute(
+        update(LoginAttempt)
+        .where(LoginAttempt.credential_id == cid, LoginAttempt.status.in_(ACTIVE_ATTEMPT_STATUSES))
+        .values(status="cancelled", code_enc=None, finished_at=func.now()))
+
+
 @router.get("/credentials/status")
 def credentials_status():
     """Whether KPI_SECRET_KEY is set, so the UI can say so before anyone tries to save a key."""
@@ -294,15 +302,13 @@ def patch_credential(cid: int, body: CredentialPatch, session: Session = Depends
                 session.add(LoginSession(credential_id=cid, status="login_needed"))
             elif reset:
                 ls.status, ls.state_enc, ls.last_error = "login_needed", None, None
-                session.execute(
-                    update(LoginAttempt)
-                    .where(LoginAttempt.credential_id == cid,
-                           LoginAttempt.status.in_(ACTIVE_ATTEMPT_STATUSES))
-                    .values(status="cancelled", code_enc=None, finished_at=func.now()))
+                ls.notified_at = None  # a new transition into login_needed alerts again
+                _cancel_attempts(session, cid)
         else:
             ls = session.get(LoginSession, cid)
             if ls is not None:
                 session.delete(ls)
+                _cancel_attempts(session, cid)
         session.commit()
     except IntegrityError:
         session.rollback()

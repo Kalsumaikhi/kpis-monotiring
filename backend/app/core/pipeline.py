@@ -227,6 +227,13 @@ def _notify(session: Session, run: Run, notifier, connector=None) -> None:
         )
         session.commit()
         session.refresh(run)
+        failed_hook = getattr(connector, "notify_failed", None)
+        if failed_hook is not None:
+            try:
+                failed_hook(session, run)
+            except Exception as e2:  # noqa: BLE001
+                log.error("notify_failed hook failed for run %s: %s", run.id, _safe_error(e2))
+                session.rollback()
 
 
 def _detach(session: Session, run: Run) -> Run:

@@ -4,7 +4,8 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from app.api import (
-    routes_credentials, routes_kpis, routes_runs, routes_sources, routes_uploads, routes_watch,
+    routes_credentials, routes_kpis, routes_logins, routes_runs, routes_sources, routes_uploads,
+    routes_watch,
 )
 from app.api.deps import require_auth
 
@@ -30,6 +31,7 @@ def create_app() -> FastAPI:
     protected.include_router(routes_watch.router)
     protected.include_router(routes_uploads.router)
     protected.include_router(routes_credentials.router)
+    protected.include_router(routes_logins.router)
     app.include_router(protected)
     return app
 

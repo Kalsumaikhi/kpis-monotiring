@@ -41,6 +41,8 @@ CODE_POLL_S = 2.0
 LOGIN_NEEDED = "login needed"
 MOVED = "login failed: login page moved to another site"
 STILL_ON_LOGIN = "login failed: still on the login page"
+# A sign-in reported success, yet the KPI pages still show the login form.
+SIGNED_IN_STILL_LOGIN = "signed in, but the pages still show the login form"
 # Common multi-part public suffixes: a cookie for one of these would cover unrelated sites.
 # Not a full Public Suffix List (no new dependency); browsers refuse such cookies anyway.
 MULTI_PART_SUFFIXES = frozenset({
