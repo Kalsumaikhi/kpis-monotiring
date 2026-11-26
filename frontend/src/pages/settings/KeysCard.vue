@@ -8,6 +8,7 @@ import { useToast } from '../../composables/useToast'
 import { absoluteTime, relativeTime } from '../../lib/format'
 import KeyForm from './KeyForm.vue'
 
+const emit = defineEmits<{ loaded: [] }>()
 const { show } = useToast()
 const keys = ref<StoredKey[]>([])
 const loading = ref(true)
@@ -49,6 +50,7 @@ async function load() {
     else error.value = e instanceof ApiError ? e.detail : 'Could not load keys'
   } finally {
     loading.value = false
+    emit('loaded')
   }
 }
 onMounted(load)

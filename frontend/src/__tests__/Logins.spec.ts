@@ -401,3 +401,35 @@ describe('Overview', () => {
     expect(w.get('[data-test=stat-attention]').text()).toContain('1')
   })
 })
+
+describe('Settings #logins', () => {
+  it('scrolls to the Keys card once it has loaded, and on a later hash change', async () => {
+    const { default: SettingsPage } = await import('../pages/SettingsPage.vue')
+    let release!: (v: unknown) => void
+    apiGet.mockImplementation((p: string) => {
+      if (p === '/api/credentials') return new Promise((r) => { release = r })
+      if (p === '/api/credentials/status') return Promise.resolve({ configured: true })
+      return Promise.resolve([])
+    })
+    const scroll = vi.fn()
+    Element.prototype.scrollIntoView = scroll
+    window.history.replaceState(null, '', '/settings#logins')
+    const w = mount(SettingsPage, { attachTo: document.body })
+    await flushPromises()
+    const early = scroll.mock.calls.length
+    release([loginKey()])
+    await flushPromises()
+    expect(scroll.mock.calls.length).toBe(early + 1) // again, now that the rows are there
+    expect(scroll.mock.contexts.at(-1)).toBe(document.getElementById('logins'))
+    window.history.replaceState(null, '', '/settings')
+    window.history.replaceState(null, '', '/settings#logins')
+    window.dispatchEvent(new HashChangeEvent('hashchange'))
+    await flushPromises()
+    expect(scroll.mock.calls.length).toBe(early + 2)
+    w.unmount()
+    window.dispatchEvent(new HashChangeEvent('hashchange'))
+    await flushPromises()
+    expect(scroll.mock.calls.length).toBe(early + 2) // listener removed
+    window.history.replaceState(null, '', '/')
+  })
+})
