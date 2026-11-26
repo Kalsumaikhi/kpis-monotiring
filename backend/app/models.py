@@ -153,7 +153,12 @@ class Upload(Base):
 
 class WatchTarget(Base):
     __tablename__ = "watch_targets"
-    __table_args__ = (UniqueConstraint("source_id", "url"),)
+    __table_args__ = (
+        UniqueConstraint("source_id", "url"),
+        # KPI names are unique per source, case-insensitively (migration 0010)
+        Index("uq_watch_targets_source_lower_kpi_name", "source_id", text("lower(kpi_name)"),
+              unique=True),
+    )
     id: Mapped[int] = _id()
     source_id: Mapped[int] = mapped_column(ForeignKey("sources.id", ondelete="CASCADE"))
     kpi_name: Mapped[str] = mapped_column(Text)

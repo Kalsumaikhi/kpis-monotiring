@@ -579,3 +579,41 @@ def test_xlsx_hyperlink_cells_use_the_link_target():
         ("Plain", "https://h.example/plain"),
         ("Lower", "https://h.example/low"),
     ]
+
+
+# --- unique KPI names per source (plan 3a task 5, item 1) -------------------------
+
+NAME_TAKEN = "a KPI with this name already exists in this source"
+
+
+def test_duplicate_kpi_name_409_message(client):
+    a = create(client).json()["id"]
+    r = create(client, kpi="price", url="https://h.example/q")
+    assert r.status_code == 409 and r.json()["detail"] == NAME_TAKEN
+    create(client, kpi="B", url="https://h.example/b")
+    r = client.patch(f"/api/watch-targets/{a}", json={"kpi_name": "b"})
+    assert r.status_code == 409 and r.json()["detail"] == NAME_TAKEN
+
+
+def test_duplicate_kpi_name_race_hits_the_index_409(client, monkeypatch):
+    """The app-level check can lose a race; the unique index then answers 409, never 500."""
+    from app.api import routes_watch
+
+    a = create(client).json()["id"]
+    create(client, kpi="B", url="https://h.example/b")
+    monkeypatch.setattr(routes_watch, "_conflict", lambda *a, **k: None)
+    r = create(client, kpi="PRICE", url="https://h.example/q")
+    assert r.status_code == 409 and r.json()["detail"] == NAME_TAKEN
+    r = client.patch(f"/api/watch-targets/{a}", json={"kpi_name": "b"})
+    assert r.status_code == 409 and r.json()["detail"] == NAME_TAKEN
+    tok = upload(client, "k.xlsx", xlsx([("Acme", "Fresh", "https://h.example/f")])).json()["token"]
+    create(client, kpi="fresh", url="https://h.example/f2")  # created since the preview
+    r = client.post("/api/watch-targets/import/confirm", json={"token": tok})
+    assert r.status_code == 409 and r.json()["detail"] == NAME_TAKEN
+
+
+def test_import_preview_flags_duplicate_names_in_sheet(client):
+    data = xlsx([("Acme", "Price", "https://h.example/a"), ("Acme", "PRICE", "https://h.example/b"),
+                 ("Other", "price", "https://h.example/c")])
+    st = [x["status"] for x in upload(client, "k.xlsx", data).json()["rows"]]
+    assert st == ["new_source", "duplicate", "new_source"]

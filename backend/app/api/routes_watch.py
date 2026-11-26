@@ -177,8 +177,20 @@ def _conflict(session: Session, source_id: int, kpi_name: str, url: str,
         q = q.where(WatchTarget.id != exclude_id)
     for t in session.scalars(q.where((WatchTarget.url == url) | (func.lower(WatchTarget.kpi_name) == kpi_name.lower()))):
         return "a KPI with this link already exists" if t.url == url else \
-            "a KPI with this name already exists in the source"
+            NAME_TAKEN
     return None
+
+
+NAME_TAKEN = "a KPI with this name already exists in this source"
+NAME_INDEX = "uq_watch_targets_source_lower_kpi_name"
+
+
+def _integrity_409(e: IntegrityError, fallback: str) -> HTTPException:
+    """409 for a constraint hit (a race the app-level check lost); names the KPI-name index."""
+    diag = getattr(getattr(e, "orig", None), "diag", None)
+    if getattr(diag, "constraint_name", None) == NAME_INDEX:
+        return HTTPException(409, NAME_TAKEN)
+    return HTTPException(409, fallback)
 
 
 def _delete_points(session: Session, source_id: int, kpi_name: str) -> None:
@@ -225,9 +237,9 @@ def create_target(body: TargetIn, session: Session = Depends(get_session)):
         t = _add_target(session, source, body.kpi_name, body.url, body.kind, body.selector,
                         use_browser, body.credential_id)
         session.commit()
-    except IntegrityError:
+    except IntegrityError as e:
         session.rollback()
-        raise HTTPException(409, "conflicting source or KPI") from None
+        raise _integrity_409(e, "conflicting source or KPI") from None
     return _target_json(t, key_name=_key_name(session, t.credential_id))
 
 
@@ -346,9 +358,9 @@ def _apply_patch(session: Session, t: WatchTarget, body: TargetPatch, new_name: 
         if supersede:
             _supersede_held(session, t.source_id, reason=HELD_REASON)
         session.commit()
-    except IntegrityError:
+    except IntegrityError as e:
         session.rollback()
-        raise HTTPException(409, "conflicting KPI") from None
+        raise _integrity_409(e, "conflicting KPI") from None
 
 
 @router.delete("/watch-targets/{target_id}", status_code=204)
@@ -498,9 +510,9 @@ def import_confirm(body: ConfirmIn, session: Session = Depends(get_session)):
         raise HTTPException(410, "import preview expired")
     try:
         return _confirm_rows(session, rows)
-    except IntegrityError:
+    except IntegrityError as e:
         session.rollback()
-        raise HTTPException(409, "import conflicts with existing sources, try again") from None
+        raise _integrity_409(e, "import conflicts with existing sources, try again") from None
 
 
 def _confirm_rows(session: Session, rows: list[dict]) -> dict:
