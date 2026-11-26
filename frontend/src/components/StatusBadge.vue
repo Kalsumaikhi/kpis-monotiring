@@ -2,7 +2,7 @@
 import { computed } from 'vue'
 
 type Tone = 'ok' | 'warn' | 'fail' | 'muted'
-type Icon = 'check' | 'dash' | 'cross' | 'alert' | 'clock' | 'spinner' | 'circle' | 'sync' | 'ban'
+type Icon = 'check' | 'dash' | 'cross' | 'alert' | 'clock' | 'spinner' | 'circle' | 'sync' | 'ban' | 'lock'
 
 const MAP: Record<string, { label: string; tone: Tone; icon: Icon }> = {
   ok: { label: 'OK', tone: 'ok', icon: 'check' },
@@ -18,6 +18,7 @@ const MAP: Record<string, { label: string; tone: Tone; icon: Icon }> = {
   blocked: { label: 'Blocked', tone: 'warn', icon: 'ban' },
   error: { label: 'Error', tone: 'fail', icon: 'cross' },
   key_rejected: { label: 'Key rejected', tone: 'fail', icon: 'cross' },
+  login_needed: { label: 'Login needed', tone: 'warn', icon: 'lock' },
   never: { label: 'Not checked yet', tone: 'muted', icon: 'clock' },
 }
 
@@ -36,6 +37,7 @@ const info = computed(() => MAP[props.status] ?? { label: props.status, tone: 'm
       <path v-else-if="info.icon === 'clock'" d="M8 4.5V8l2.5 1.5M8 14a6 6 0 100-12 6 6 0 000 12z" />
       <path v-else-if="info.icon === 'spinner'" d="M8 2a6 6 0 106 6" />
       <path v-else-if="info.icon === 'sync'" d="M13 8a5 5 0 01-9 3M3 8a5 5 0 019-3M12 2v3h-3M4 14v-3h3" />
+      <path v-else-if="info.icon === 'lock'" d="M4.5 7.5h7v5.5h-7zM6 7.5V5.5a2 2 0 014 0v2" />
       <path v-else d="M8 14a6 6 0 100-12 6 6 0 000 12zM3.8 3.8l8.4 8.4" />
     </svg>
     <span>{{ info.label }}</span>

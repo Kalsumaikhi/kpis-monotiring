@@ -17,6 +17,9 @@ const useBrowser = ref(props.target?.use_browser ?? false)
 const advanced = ref(!!props.openAdvanced || !!props.target?.selector || props.target?.kind === 'api' || !!props.target?.use_browser)
 const credentialId = ref<number | null>(props.target?.credential_id ?? null)
 const keys = ref<StoredKey[]>([])
+const isLogin = computed(() => keys.value.find((k) => k.id === credentialId.value)?.kind === 'login')
+// A login key always runs in the browser (the server sets this too).
+watch(isLogin, (v) => { if (v) useBrowser.value = true }, { flush: 'sync' })
 const saving = ref(false)
 const saveError = ref('')
 const testing = ref(false)
@@ -31,7 +34,7 @@ const urlOk = computed(() => /^https?:\/\/[^\s/]+\S*$/i.test(url.value.trim()))
 const keyProblem = computed(() => {
   if (credentialId.value === null) return ''
   if (/^http:\/\//i.test(url.value.trim())) return 'keys can only be sent over https'
-  if (useBrowser.value) return 'keys can\'t be used with "Needs a browser" yet'
+  if (useBrowser.value && !isLogin.value) return 'keys can\'t be used with "Needs a browser" yet'
   return ''
 })
 const valid = computed(() => source.value.trim() !== '' && kpi.value.trim() !== '' && urlOk.value && !keyProblem.value)
@@ -162,7 +165,7 @@ const jsonRows = computed(() => (testResult.value?.json_preview ?? []).map((r) =
       </template>
     </div>
 
-    <details class="adv" :open="advanced" @toggle="advanced = ($event.target as HTMLDetailsElement).open">
+    <details class="adv" :open="advanced || isLogin" @toggle="advanced = ($event.target as HTMLDetailsElement).open">
       <summary>Advanced</summary>
       <div class="adv-body">
         <div class="field">
@@ -178,7 +181,8 @@ const jsonRows = computed(() => (testResult.value?.json_preview ?? []).map((r) =
             <option value="api">API (JSON)</option>
           </select>
         </div>
-        <label class="check"><input v-model="useBrowser" type="checkbox" /> Needs a browser (page builds itself with JavaScript)</label>
+        <label class="check"><input v-model="useBrowser" type="checkbox" data-test="browser-box" :disabled="isLogin" aria-describedby="tf-browser-hint" /> Needs a browser (page builds itself with JavaScript)</label>
+        <span v-if="isLogin" id="tf-browser-hint" class="hint muted">Logins always use the browser</span>
       </div>
     </details>
 
