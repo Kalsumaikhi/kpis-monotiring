@@ -144,8 +144,10 @@ Each item gets a test first.
 **Items:**
 1. **Unique KPI names per source.** Add a unique index on `watch_targets (source_id, lower(kpi_name))`.
    - Migration: dedupe first by suffixing " (2)", " (3)" in id order, and log the renames.
-   - The API returns 409 `"a KPI with this name already exists in this source"` on a duplicate, both on create and on import confirm.
+   - The API returns 409 `"a KPI with this name already exists in this source"` on a duplicate on create and rename, and when a race reaches the index.
+   - *As built:* import confirm does not return 409 for a row whose name was taken after the preview. It skips the row and gives the reason per row (`skipped_rows`). A race that reaches the index still returns 409.
 2. **PATCH or DELETE of a watch target takes the source lock** (try-lock, 409 when busy), and refreshing after the lock is taken returns a 404 rather than a 500 if the target was deleted meanwhile.
+   - *As built:* harmless PATCHes (selector, kind, browser mode, enable) stay lock-free, because an existing test requires it. Renames, link changes, disables, key changes and deletes take the lock.
 3. **Login edits with dependants.**
    - PATCH of a login key that changes the login host, or removes an "Also used on" host still used by an enabled target, returns 409.
    - The 409 lists the affected KPI names, at most 5, with "+N more".
