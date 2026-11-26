@@ -29,7 +29,7 @@ from datetime import timedelta
 from urllib.parse import urlsplit
 
 import httpx
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import IntegrityError
 
 from app import credentials as creds
@@ -48,6 +48,7 @@ log = logging.getLogger(__name__)
 
 CODE_WINDOW = timedelta(minutes=10)
 STALE_AFTER = timedelta(minutes=15)
+KEEP_ATTEMPTS = timedelta(days=30)  # finished attempts are pruned at startup after this
 # Longer than one automatic sign-in can hold the lock (or a cancelled attempt finishing its
 # current browser step), so "Sign in now" waits instead of failing with BUSY.
 LOCK_WAIT_S = logins.SIGN_IN_BUDGET_S + logins.SUBMIT_WAIT_S + 15.0
@@ -449,7 +450,23 @@ def sweep_stale_attempts(session_factory) -> int:
                 s.commit()
         except logins.LoginBusy:
             continue
+    prune_old_attempts(session_factory)
     return swept
+
+
+def prune_old_attempts(session_factory) -> int:
+    """Delete finished attempts (no longer active) that ended more than KEEP_ATTEMPTS ago
+    (created_at when finished_at was never set). Returns how many were deleted."""
+    with session_factory() as s:
+        res = s.execute(delete(LoginAttempt).where(
+            LoginAttempt.status.not_in(ACTIVE_ATTEMPT_STATUSES),
+            func.coalesce(LoginAttempt.finished_at, LoginAttempt.created_at)
+            < func.now() - KEEP_ATTEMPTS))
+        s.commit()
+    if res.rowcount:
+        log.info("pruned %d sign-in attempt(s) older than %d days", res.rowcount,
+                 KEEP_ATTEMPTS.days)
+    return res.rowcount
 
 
 class AttemptWorker:
