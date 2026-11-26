@@ -9,14 +9,14 @@ from urllib.parse import urlsplit
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app import credentials as creds
 from app.api.deps import get_session
 from app.api.util import iso
-from app.models import Credential, LoginSession, Source, WatchTarget
+from app.models import ACTIVE_ATTEMPT_STATUSES, Credential, LoginAttempt, LoginSession, Source, WatchTarget
 
 router = APIRouter()
 
@@ -73,7 +73,10 @@ def _check_login(fields: dict) -> None:
     url = fields["login_url"]
     try:
         parts = urlsplit(url) if isinstance(url, str) else None
-        ok = parts is not None and parts.scheme.lower() == "https" and bool(parts.hostname)
+        ok = (parts is not None and parts.scheme.lower() == "https" and bool(parts.hostname)
+              and len(url) <= 2048 and not re.search(r"[\x00-\x20\x7f]", url)
+              and "@" not in parts.netloc)
+        parts and parts.port  # raises ValueError on a bad port
     except ValueError:
         ok = False
     if not ok:
@@ -91,10 +94,13 @@ def _check_login(fields: dict) -> None:
     if hosts is not None:
         if len(hosts) > MAX_EXTRA_HOSTS:
             raise HTTPException(422, f"at most {MAX_EXTRA_HOSTS} extra hosts")
+        norm = []
         for h in hosts:
-            if not isinstance(h, str) or not HOSTNAME.match(h):
+            n = h.strip().lower() if isinstance(h, str) else h
+            if not isinstance(n, str) or not HOSTNAME.fullmatch(n):
                 raise HTTPException(422, f"invalid host: {h}")
-        fields["extra_hosts"] = list(dict.fromkeys(hosts)) or None
+            norm.append(n)
+        fields["extra_hosts"] = list(dict.fromkeys(norm)) or None
 
 
 def _validate(name: str | None, kind: str, fields: dict, secret: str | None) -> dict:
@@ -119,7 +125,7 @@ def _validate(name: str | None, kind: str, fields: dict, secret: str | None) -> 
         raise HTTPException(422, "prefix must be at most 32 characters, no line breaks")
     if kind == "header" and prefix and not HEADER_SAFE.match(prefix):
         raise HTTPException(422, NOT_ASCII)
-    if user and (":" in user or len(user) > 256):
+    if user and ((kind == "basic" and ":" in user) or len(user) > 256):
         raise HTTPException(422, "username must be at most 256 characters and not contain ':'")
     if secret is not None:
         if len(secret) < MIN_SECRET:
@@ -265,6 +271,9 @@ def patch_credential(cid: int, body: CredentialPatch, session: Session = Depends
             ) from None
         if not HEADER_SAFE.match(stored):
             raise HTTPException(422, NOT_ASCII)
+    reset = kind == "login" and row.kind == "login" and (
+        "secret" in data or fields["username"] != row.username
+        or fields["login_url"] != row.login_url)
     if "secret" in data:
         row.secret_enc = _encrypt(data["secret"])
         row.last_error = None  # a new secret has not been rejected yet; last_used_at stays
@@ -273,8 +282,16 @@ def patch_credential(cid: int, body: CredentialPatch, session: Session = Depends
         setattr(row, k, v)
     try:
         if kind == "login":
-            if session.get(LoginSession, cid) is None:
+            ls = session.get(LoginSession, cid)
+            if ls is None:
                 session.add(LoginSession(credential_id=cid, status="login_needed"))
+            elif reset:
+                ls.status, ls.state_enc, ls.last_error = "login_needed", None, None
+                session.execute(
+                    update(LoginAttempt)
+                    .where(LoginAttempt.credential_id == cid,
+                           LoginAttempt.status.in_(ACTIVE_ATTEMPT_STATUSES))
+                    .values(status="cancelled", code_enc=None, finished_at=func.now()))
         else:
             ls = session.get(LoginSession, cid)
             if ls is not None:

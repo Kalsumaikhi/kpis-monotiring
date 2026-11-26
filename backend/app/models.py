@@ -274,6 +274,7 @@ class LoginAttempt(Base):
 
 
 Index("uq_credentials_name_lower", func.lower(Credential.name), unique=True)
+Index("ix_login_attempts_credential_id", LoginAttempt.credential_id)
 Index(
     "uq_login_attempts_active", LoginAttempt.credential_id, unique=True,
     postgresql_where=LoginAttempt.status.in_(ACTIVE_ATTEMPT_STATUSES),

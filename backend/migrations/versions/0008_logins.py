@@ -39,6 +39,7 @@ def upgrade() -> None:
         sa.Column("waiting_since", sa.DateTime(timezone=True)),
         sa.Column("finished_at", sa.DateTime(timezone=True)),
     )
+    op.create_index("ix_login_attempts_credential_id", "login_attempts", ["credential_id"])
     op.execute(
         "CREATE UNIQUE INDEX uq_login_attempts_active ON login_attempts (credential_id) "
         "WHERE status IN ('pending', 'signing_in', 'waiting_code', 'verifying')"
@@ -46,10 +47,12 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    if op.get_bind().execute(sa.text("SELECT 1 FROM credentials WHERE kind = 'login' LIMIT 1")).first():
+        raise RuntimeError("delete login keys before downgrading 0008")
     op.drop_index("uq_login_attempts_active", table_name="login_attempts")
+    op.drop_index("ix_login_attempts_credential_id", table_name="login_attempts")
     op.drop_table("login_attempts")
     op.drop_table("login_sessions")
-    op.execute("DELETE FROM credentials WHERE kind = 'login'")
     op.drop_column("credentials", "extra_hosts")
     op.drop_column("credentials", "selectors")
     op.drop_column("credentials", "login_url")
