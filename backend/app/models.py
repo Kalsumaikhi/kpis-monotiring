@@ -58,6 +58,9 @@ class Source(Base):
     # Set when the key changes (only for connectors that send one); the next fetched run is
     # a silent baseline. Set and cleared only under the per-source lock (see patch_source).
     needs_baseline: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
+    # When needs_baseline was last set (a key change); runs started before it don't count
+    # toward the key baseline's skipped-deletions limit (pipeline._skipped_deletions_before).
+    needs_baseline_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = _now()
 
 

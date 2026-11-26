@@ -221,3 +221,18 @@ def test_migration_0010_renames_are_shown_by_the_alembic_cli(db_engine):
         e.dispose()
         with db_engine.connect().execution_options(isolation_level="AUTOCOMMIT") as c:
             c.execute(text(f"DROP DATABASE IF EXISTS {name} WITH (FORCE)"))
+
+
+def test_migration_0011_downgrade_and_upgrade(db_session):
+    from alembic.migration import MigrationContext
+    from alembic.operations import Operations
+    from sqlalchemy import text
+
+    mod = _load_migration("0011_source_needs_baseline_at.py", "m0011")
+    has = text("SELECT 1 FROM information_schema.columns WHERE table_name = 'sources' "
+               "AND column_name = 'needs_baseline_at'")
+    with Operations.context(MigrationContext.configure(db_session.connection())):
+        mod.downgrade()
+        assert db_session.execute(has).first() is None
+        mod.upgrade()
+        assert db_session.execute(has).first() is not None

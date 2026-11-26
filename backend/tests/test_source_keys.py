@@ -695,3 +695,39 @@ def test_key_edit_409_when_a_source_took_the_key_meanwhile(env, db_session, clie
     assert r.status_code == 409 and r.json()["detail"] == BUSY_KEY
     db_session.expire_all()
     assert db_session.get(Credential, k1.id).secret_enc == before
+
+
+@respx.mock
+def test_skip_marker_under_the_previous_key_does_not_count(env, db_session, client):
+    """K1's short key baseline left a skip marker; switching to K2 starts the count again:
+    K2's first short run keeps the flag, its second clears it."""
+    src, conn, sf = env
+    k1 = mk_cred(db_session, name="K1")
+    k2 = mk_cred(db_session, name="K2", secret="sk-other-secret")
+    respx.get("https://api.example.com/data").mock(return_value=httpx.Response(200, text="ok"))
+    conn.rows = [_row(f"C{i}", i) for i in range(10)]
+    pipeline.run_source(sf, "fake")
+    assert client.patch("/api/sources/fake", json={"credential_id": k1.id}).status_code == 200
+    conn.rows = [_row("C0", 0)]
+    assert "key baseline skipped deletions" in pipeline.run_source(sf, "fake").error  # K1 trips
+    assert client.patch("/api/sources/fake", json={"credential_id": k2.id}).status_code == 200
+    db_session.expire_all()
+    assert db_session.get(Source, src.id).needs_baseline_at is not None
+    flags = []
+    for _ in range(2):
+        run = pipeline.run_source(sf, "fake")
+        assert run.status == "baseline" and "key baseline skipped deletions" in run.error
+        db_session.expire_all()
+        flags.append(db_session.get(Source, src.id).needs_baseline)
+    assert flags == [True, False]
+
+
+def test_key_edit_sets_needs_baseline_at(env, db_session, client):
+    src, conn, sf = env
+    k1 = mk_cred(db_session, name="K1")
+    src.credential_id = k1.id
+    db_session.flush()
+    assert client.patch(f"/api/credentials/{k1.id}", json={"secret": "sk-rotated-secret"}).status_code == 200
+    db_session.expire_all()
+    s = db_session.get(Source, src.id)
+    assert s.needs_baseline is True and s.needs_baseline_at is not None

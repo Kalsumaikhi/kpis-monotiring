@@ -209,6 +209,7 @@ def patch_source(slug: str, body: SourcePatch, session: Session = Depends(get_se
             if body.credential_id != source.credential_id:
                 source.credential_id = body.credential_id
                 source.needs_baseline = True
+                source.needs_baseline_at = func.clock_timestamp()
                 _supersede_held(session, sid, reason=KEY_CHANGE)
             session.commit()
     return {"slug": source.slug, "enabled": source.enabled, "cron": source.cron,

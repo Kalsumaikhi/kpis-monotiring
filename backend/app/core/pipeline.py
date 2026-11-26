@@ -406,13 +406,16 @@ SKIPPED_DELETIONS = "key baseline skipped deletions"  # also read by the notifie
 
 
 def _skipped_deletions_before(session: Session, source_id: int, run_id: int) -> bool:
-    """Whether the source's previous applied run was a key baseline that skipped deletions.
-    Failed and held runs don't count, so a failure in between doesn't restart the count."""
-    error = session.scalar(
-        select(Run.error)
-        .where(Run.source_id == source_id, Run.id < run_id,
-               Run.status.in_(("ok", "no_change", "baseline")))
-        .order_by(Run.id.desc()).limit(1))
+    """Whether the source's previous applied run was a key baseline that skipped deletions
+    under the current key: runs started before the flag was last set (an earlier key) don't
+    count. Failed and held runs don't count, so a failure in between doesn't restart it."""
+    q = (select(Run.error)
+         .where(Run.source_id == source_id, Run.id < run_id,
+                Run.status.in_(("ok", "no_change", "baseline"))))
+    since = session.scalar(select(Source.needs_baseline_at).where(Source.id == source_id))
+    if since is not None:
+        q = q.where(Run.started_at >= since)
+    error = session.scalar(q.order_by(Run.id.desc()).limit(1))
     return SKIPPED_DELETIONS in (error or "")
 
 
@@ -442,14 +445,16 @@ def run_source(
             claimed = session.execute(
                 update(Run)
                 .where(Run.id == run_id, Run.source_id == source.id, Run.status == "queued")
-                .values(status="running", started_at=func.now())
+                .values(status="running", started_at=func.clock_timestamp())
             ).rowcount
             session.commit()
             if claimed == 0:
                 raise RunNotQueuedError(f"run {run_id} is not a queued run of {slug}")
             run = session.get(Run, run_id)
         else:
-            run = Run(source_id=source.id, status="running", trigger=trigger)
+            # The real start time (not the transaction's): compared with needs_baseline_at.
+            run = Run(source_id=source.id, status="running", trigger=trigger,
+                      started_at=func.clock_timestamp())
             session.add(run)
             session.commit()
         run_id = run.id

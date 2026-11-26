@@ -370,7 +370,7 @@ def _patch(session: Session, row: Credential, cid: int, data: dict, name: str, k
         if affected:
             session.execute(update(Source).where(Source.id.in_(affected),
                                                  Source.credential_id == cid)
-                            .values(needs_baseline=True))
+                            .values(needs_baseline=True, needs_baseline_at=func.clock_timestamp()))
             session.execute(update(WatchTarget).where(WatchTarget.credential_id == cid)
                             .values(needs_baseline=True))
             for sid in affected:
