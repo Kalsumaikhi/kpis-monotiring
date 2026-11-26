@@ -6,7 +6,7 @@ import type { ImportConfirmResult, ImportPreview, ImportRowStatus } from '../../
 const props = defineProps<{ open: boolean }>()
 const emit = defineEmits<{ close: []; imported: [] }>()
 
-const TEMPLATE = 'Source name,KPI name,Link\r\nAcme,Pricing page,https://example.com/pricing\r\n'
+const TEMPLATE = 'Source name,KPI name,Link,Key name\r\nAcme,Pricing page,https://example.com/pricing,\r\n'
 const CHIP: Record<ImportRowStatus, { label: string; tone: 'ok' | 'muted' | 'fail'; mark: string }> = {
   new_source: { label: 'New source', tone: 'ok', mark: '+' },
   existing_source: { label: 'Existing source', tone: 'ok', mark: '✓' },
@@ -132,7 +132,7 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onKey, true))
     <div v-if="open" class="overlay" @click.self="tryClose">
       <div ref="dialog" class="dialog" role="dialog" aria-modal="true" aria-labelledby="imp-title">
         <h2 id="imp-title">Import KPIs from Excel or CSV</h2>
-        <p class="muted">One row per KPI with the columns <code>Source name</code>, <code>KPI name</code> and <code>Link</code>.
+        <p class="muted">One row per KPI with the columns <code>Source name</code>, <code>KPI name</code> and <code>Link</code>, plus an optional <code>Key name</code> (a key saved in Settings → Keys).
           <button type="button" class="linklike" data-test="template" @click="downloadTemplate">Download template</button></p>
 
         <div class="field">
@@ -149,13 +149,14 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onKey, true))
           </p>
           <div class="table-wrap" tabindex="0" aria-label="Import preview">
             <table>
-              <thead><tr><th scope="col">Row</th><th scope="col">Source</th><th scope="col">KPI</th><th scope="col">Link</th><th scope="col">Status</th></tr></thead>
+              <thead><tr><th scope="col">Row</th><th scope="col">Source</th><th scope="col">KPI</th><th scope="col">Link</th><th scope="col">Key</th><th scope="col">Status</th></tr></thead>
               <tbody>
                 <tr v-for="r in preview.rows" :key="r.row" :class="{ dim: r.status === 'duplicate' }">
                   <td>{{ r.row }}</td>
                   <td>{{ r.source_name }}</td>
                   <td>{{ r.kpi_name }}</td>
                   <td class="url">{{ r.url }}</td>
+                  <td data-test="key-cell">{{ r.key_name || '—' }}</td>
                   <td>
                     <span class="chip" :class="`tone-${CHIP[r.status]?.tone ?? 'muted'}`"><span aria-hidden="true">{{ CHIP[r.status]?.mark }}</span> {{ CHIP[r.status]?.label ?? r.status }}</span>
                     <div v-if="r.error" class="error-text small">{{ r.error }}</div>

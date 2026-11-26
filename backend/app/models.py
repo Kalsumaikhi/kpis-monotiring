@@ -3,6 +3,7 @@ from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import (
+    LargeBinary,
     BigInteger,
     Boolean,
     Date,
@@ -52,6 +53,8 @@ class Source(Base):
     cron: Mapped[str] = mapped_column(Text, server_default="0 3 * * *")
     enabled: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))
     config: Mapped[dict[str, Any]] = mapped_column(JSONB, server_default=text("'{}'::jsonb"))
+    credential_id: Mapped[int | None] = mapped_column(
+        ForeignKey("credentials.id", ondelete="RESTRICT"))
     created_at: Mapped[datetime] = _now()
 
 
@@ -160,6 +163,8 @@ class WatchTarget(Base):
     last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_error: Mapped[str | None] = mapped_column(Text)
     needs_baseline: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))
+    credential_id: Mapped[int | None] = mapped_column(
+        ForeignKey("credentials.id", ondelete="RESTRICT"))
     created_at: Mapped[datetime] = _now()
 
 
@@ -213,3 +218,24 @@ class ImportPreview(Base):
     token: Mapped[str] = mapped_column(Text, primary_key=True)
     rows: Mapped[Any] = mapped_column(JSONB)
     created_at: Mapped[datetime] = _now()
+
+
+class Credential(Base):
+    """A stored API key / licence credential; the secret is Fernet-encrypted (app.credentials)."""
+    __tablename__ = "credentials"
+    id: Mapped[int] = _id()
+    name: Mapped[str] = mapped_column(Text)
+    kind: Mapped[str] = mapped_column(Text)  # 'header' | 'query' | 'basic'
+    header_name: Mapped[str | None] = mapped_column(Text)
+    prefix: Mapped[str | None] = mapped_column(Text)
+    param_name: Mapped[str | None] = mapped_column(Text)
+    username: Mapped[str | None] = mapped_column(Text)
+    secret_enc: Mapped[bytes] = mapped_column(LargeBinary)
+    created_at: Mapped[datetime] = _now()
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error: Mapped[str | None] = mapped_column(Text)
+
+
+Index("uq_credentials_name_lower", func.lower(Credential.name), unique=True)

@@ -38,10 +38,13 @@ export interface Source {
   incomplete: boolean
   noisy_targets: number
   last_success_at: string | null
+  credential_id: number | null
+  credential_name: string | null
+  credential_supported: boolean
 }
 // PATCH /api/sources/{slug}
-export interface SourcePatchResult { slug: string; enabled: boolean; cron: string | null }
-export interface SourcePatch { enabled?: boolean; cron?: string }
+export interface SourcePatchResult { slug: string; enabled: boolean; cron: string | null; credential_id?: number | null }
+export interface SourcePatch { enabled?: boolean; cron?: string; credential_id?: number | null }
 // POST /api/sources/{slug}/run (202)
 export interface RunNowResult { run_id: number }
 
@@ -141,7 +144,7 @@ export interface UploadResult { run_id: number }
 // Custom (watch) sources
 export type WatchKind = 'auto' | 'page' | 'api'
 // watch_targets.last_status: 'never' until checked, then the last fetch outcome
-export type WatchStatus = 'ok' | 'blocked' | 'error' | 'never'
+export type WatchStatus = 'ok' | 'blocked' | 'error' | 'never' | 'key_rejected'
 export interface WatchTarget {
   id: number
   kpi_name: string
@@ -154,6 +157,8 @@ export interface WatchTarget {
   last_checked_at: string | null
   last_error: string | null
   noisy: boolean
+  credential_id: number | null
+  credential_name: string | null
 }
 export interface CustomSource {
   slug: string
@@ -169,6 +174,7 @@ export interface TargetIn {
   kind?: WatchKind
   selector?: string | null
   use_browser?: boolean
+  credential_id?: number | null
 }
 export interface TargetPatch {
   kpi_name?: string
@@ -177,8 +183,9 @@ export interface TargetPatch {
   selector?: string | null
   use_browser?: boolean
   enabled?: boolean
+  credential_id?: number | null
 }
-export interface TestLinkIn { url: string; kind?: WatchKind; selector?: string | null; use_browser?: boolean }
+export interface TestLinkIn { url: string; kind?: WatchKind; selector?: string | null; use_browser?: boolean; credential_id?: number | null }
 export interface TestLinkResult {
   status: string
   kind: string
@@ -194,8 +201,42 @@ export interface ImportRow {
   source_name: string
   kpi_name: string
   url: string
+  key_name?: string | null
   status: ImportRowStatus
   error?: string
 }
 export interface ImportPreview { token: string; rows: ImportRow[] }
 export interface ImportConfirmResult { created_sources: number; created_targets: number; skipped: number }
+
+// Stored keys: GET/POST/PATCH/DELETE /api/credentials. The secret is write-only and never returned.
+export type KeyKind = 'header' | 'query' | 'basic'
+export interface KeyUsedBy {
+  targets: { id: number; kpi_name: string; source: string }[]
+  sources: string[]
+}
+export interface StoredKey {
+  id: number
+  name: string
+  kind: KeyKind
+  header_name: string | null
+  prefix: string | null
+  param_name: string | null
+  username: string | null
+  has_secret: boolean
+  readable: boolean
+  created_at: string | null
+  updated_at: string | null
+  last_used_at: string | null
+  last_error: string | null
+  used_by: KeyUsedBy
+}
+export interface KeyIn {
+  name: string
+  kind: KeyKind
+  header_name?: string | null
+  prefix?: string | null
+  param_name?: string | null
+  username?: string | null
+  secret: string
+}
+export type KeyPatch = Partial<KeyIn>

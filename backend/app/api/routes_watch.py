@@ -24,8 +24,9 @@ from app.core.pipeline import SourceBusyError, _acquire_source_lock, _supersede_
 from app.core.canonical import dims_to_json, key_hash_for
 from app.connectors.watch.connector import _process
 from app.connectors.watch.extract import flatten_json
-from app.connectors.watch.fetch import fetch_target
-from app.models import DataPoint, ImportPreview, Indicator, Source, WatchTarget
+from app import credentials as creds
+from app.connectors.watch.fetch import NEEDS_HTTPS, NO_BROWSER_KEY, fetch_target
+from app.models import Credential, DataPoint, ImportPreview, Indicator, Source, WatchTarget
 
 router = APIRouter()
 
@@ -57,6 +58,7 @@ class TargetIn(BaseModel):
     kind: Kind = "auto"
     selector: str | None = None
     use_browser: bool = False
+    credential_id: int | None = None
 
     _n = field_validator("source_name", "kpi_name")(lambda cls, v: _nonblank(v))
     _u = field_validator("url")(lambda cls, v: _valid_url(v))
@@ -69,6 +71,7 @@ class TargetPatch(BaseModel):
     selector: str | None = None
     use_browser: bool | None = None
     enabled: bool | None = None
+    credential_id: int | None = None
 
     @field_validator("kpi_name")
     @classmethod
@@ -86,6 +89,7 @@ class TestIn(BaseModel):
     kind: Kind = "auto"
     selector: str | None = None
     use_browser: bool = False
+    credential_id: int | None = None
 
     _u = field_validator("url")(lambda cls, v: _valid_url(v))
 
@@ -98,12 +102,30 @@ def _slugify(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "source"
 
 
-def _target_json(t: WatchTarget, noisy: bool = False) -> dict:
+def _check_key(session: Session, credential_id: int | None, url: str, use_browser: bool) -> None:
+    """422 unless the key exists and the link is one a key may be sent to."""
+    if credential_id is None:
+        return
+    if session.get(Credential, credential_id) is None:
+        raise HTTPException(422, "unknown key")
+    if urlsplit(url).scheme != "https":
+        raise HTTPException(422, NEEDS_HTTPS)
+    if use_browser:
+        raise HTTPException(422, NO_BROWSER_KEY)
+
+
+def _key_name(session: Session, credential_id: int | None) -> str | None:
+    return None if credential_id is None else session.scalar(
+        select(Credential.name).where(Credential.id == credential_id))
+
+
+def _target_json(t: WatchTarget, noisy: bool = False, key_name: str | None = None) -> dict:
     return {
         "id": t.id, "kpi_name": t.kpi_name, "url": t.url, "kind": t.kind,
         "selector": t.selector, "use_browser": t.use_browser, "enabled": t.enabled,
         "last_status": t.last_status, "last_checked_at": iso(t.last_checked_at),
         "last_error": t.last_error, "noisy": noisy,
+        "credential_id": t.credential_id, "credential_name": key_name,
     }
 
 
@@ -144,9 +166,10 @@ def _delete_points(session: Session, source_id: int, kpi_name: str) -> None:
 
 
 def _add_target(session: Session, source: Source, kpi_name: str, url: str, kind="auto",
-                selector=None, use_browser=False) -> WatchTarget:
+                selector=None, use_browser=False, credential_id=None) -> WatchTarget:
     t = WatchTarget(source_id=source.id, kpi_name=kpi_name, url=url, kind=kind,
-                    selector=(selector or None), use_browser=use_browser, needs_baseline=True)
+                    selector=(selector or None), use_browser=use_browser, needs_baseline=True,
+                    credential_id=credential_id)
     session.add(t)
     session.flush()
     return t
@@ -157,15 +180,18 @@ def list_custom_sources(session: Session = Depends(get_session)):
     out = []
     for s in session.scalars(select(Source).where(Source.access == "watch").order_by(Source.name)):
         noisy = noisy_target_ids(session, s.id)
-        targets = session.scalars(
-            select(WatchTarget).where(WatchTarget.source_id == s.id).order_by(WatchTarget.id)).all()
+        targets = session.execute(
+            select(WatchTarget, Credential.name)
+            .outerjoin(Credential, Credential.id == WatchTarget.credential_id)
+            .where(WatchTarget.source_id == s.id).order_by(WatchTarget.id)).all()
         out.append({"slug": s.slug, "name": s.name, "enabled": s.enabled, "cron": s.cron,
-                    "targets": [_target_json(t, t.id in noisy) for t in targets]})
+                    "targets": [_target_json(t, t.id in noisy, name) for t, name in targets]})
     return out
 
 
 @router.post("/custom-sources", status_code=201)
 def create_target(body: TargetIn, session: Session = Depends(get_session)):
+    _check_key(session, body.credential_id, body.url, body.use_browser)
     source = _find_source(session, body.source_name)
     if source is not None:
         msg = _conflict(session, source.id, body.kpi_name, body.url)
@@ -175,12 +201,12 @@ def create_target(body: TargetIn, session: Session = Depends(get_session)):
         if source is None:
             source = _new_source(session, body.source_name)
         t = _add_target(session, source, body.kpi_name, body.url, body.kind, body.selector,
-                        body.use_browser)
+                        body.use_browser, body.credential_id)
         session.commit()
     except IntegrityError:
         session.rollback()
         raise HTTPException(409, "conflicting source or KPI") from None
-    return _target_json(t)
+    return _target_json(t, key_name=_key_name(session, t.credential_id))
 
 
 def _target_or_404(session: Session, target_id: int) -> WatchTarget:
@@ -210,14 +236,17 @@ def patch_target(target_id: int, body: TargetPatch, session: Session = Depends(g
     new_name = body.kpi_name if body.kpi_name is not None else t.kpi_name
     new_url = body.url if body.url is not None else t.url
     renames, repoints = new_name != t.kpi_name, new_url != t.url
+    new_key = body.credential_id if "credential_id" in body.model_fields_set else t.credential_id
+    _check_key(session, new_key, new_url,
+               body.use_browser if body.use_browser is not None else t.use_browser)
     disables = body.enabled is False and t.enabled
     if not (renames or repoints or disables):
         _apply_patch(session, t, body, new_name, new_url)
-        return _target_json(t)
+        return _target_json(t, key_name=_key_name(session, t.credential_id))
     with _source_lock(session, t.source_id):
         session.refresh(t)  # state may have changed while waiting
         _apply_patch(session, t, body, new_name, new_url, supersede=True)
-    return _target_json(t)
+    return _target_json(t, key_name=_key_name(session, t.credential_id))
 
 
 # Held runs were diffed against the targets as they were; applying one after a KPI changed
@@ -261,6 +290,10 @@ def _apply_patch(session: Session, t: WatchTarget, body: TargetPatch, new_name: 
         for f in ("kind", "use_browser"):
             if f in body.model_fields_set and getattr(body, f) is not None:
                 setattr(t, f, getattr(body, f))
+        if "credential_id" in body.model_fields_set and body.credential_id != t.credential_id:
+            # Like a re-point: with a different key (or none) the page may show different
+            # content (a teaser vs the full page), so the next check is a silent baseline.
+            t.credential_id, t.needs_baseline = body.credential_id, True
         if "selector" in body.model_fields_set:
             t.selector = body.selector or None
         if supersede:
@@ -285,13 +318,20 @@ def delete_target(target_id: int, session: Session = Depends(get_session)):
 
 
 @router.post("/watch-targets/test")
-def test_link(body: TestIn):
+def test_link(body: TestIn, session: Session = Depends(get_session)):
     """Fetch and extract once; nothing is written."""
+    _check_key(session, body.credential_id, body.url, body.use_browser)
     entry = {"id": 0, "kpi_name": "", "url": body.url, "kind": body.kind,
              "selector": body.selector or None}
+    cred = None
+    if body.credential_id is not None:
+        try:
+            cred = creds.load(session, body.credential_id)
+        except creds.KeyUnavailable as e:
+            return {"status": "error", "kind": body.kind, "error": f"key unavailable ({e})"}
     with httpx.Client(timeout=30) as client:
         try:
-            res = fetch_target(client, body.url, body.use_browser)
+            res = fetch_target(client, body.url, body.use_browser, credential=cred)
             e = _process(entry, res)
         except Exception as exc:  # noqa: BLE001 - report, never 500
             return {"status": "error", "kind": body.kind, "error": f"unexpected error: {type(exc).__name__}"}
@@ -313,6 +353,7 @@ def _classify(session: Session, rows: list[dict]) -> list[dict]:
     seen_urls: set[tuple[str, str]] = set()
     seen_names: set[tuple[str, str]] = set()
     known_sources: dict[str, Source | None] = {}
+    keys = {name.lower(): cid for cid, name in session.execute(select(Credential.id, Credential.name))}
     out = []
     for r in rows:
         res = {**r}
@@ -328,6 +369,17 @@ def _classify(session: Session, rows: list[dict]) -> list[dict]:
             res.update(status="invalid", error=msg)
             out.append(res)
             continue
+        key_name = (r.get("key_name") or "").strip()
+        if key_name:
+            if key_name.lower() not in keys:
+                res.update(status="invalid", error=f"unknown key: {key_name}")
+                out.append(res)
+                continue
+            if urlsplit(r["url"]).scheme != "https":
+                res.update(status="invalid", error=NEEDS_HTTPS)
+                out.append(res)
+                continue
+            res["credential_id"] = keys[key_name.lower()]
         if src_key not in known_sources:
             known_sources[src_key] = _find_source(session, r["source_name"])
         src = known_sources[src_key]
@@ -386,9 +438,13 @@ def import_confirm(body: ConfirmIn, session: Session = Depends(get_session)):
 
 def _confirm_rows(session: Session, rows: list[dict]) -> dict:
     created_sources = created_targets = skipped = 0
+    known_keys = set(session.scalars(select(Credential.id)))
     for r in rows:
         if r["status"] not in ("new_source", "existing_source"):
             skipped += 1
+            continue
+        if r.get("credential_id") is not None and r["credential_id"] not in known_keys:
+            skipped += 1  # key deleted since the preview
             continue
         source = _find_source(session, r["source_name"])
         if source is not None and _conflict(session, source.id, r["kpi_name"], r["url"]):
@@ -397,7 +453,7 @@ def _confirm_rows(session: Session, rows: list[dict]) -> dict:
         if source is None:
             source = _new_source(session, r["source_name"])
             created_sources += 1
-        _add_target(session, source, r["kpi_name"], r["url"])
+        _add_target(session, source, r["kpi_name"], r["url"], credential_id=r.get("credential_id"))
         created_targets += 1
     session.commit()
     return {"created_sources": created_sources, "created_targets": created_targets,

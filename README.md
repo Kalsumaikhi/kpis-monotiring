@@ -122,7 +122,7 @@ All colours are CSS custom properties in `frontend/src/styles/tokens.css`, with 
 Besides the built-in datasets you can watch any web page or JSON API link (Settings → Custom sources). Each KPI is one link; KPIs are grouped under a source name.
 
 - **Add KPI**: source name, KPI name, link. "Test link" shows what would be read. Under Advanced you can set a CSS selector (focus area), force page/API mode, or ask for a headless browser for JavaScript-built pages.
-- **Import from Excel/CSV**: a `.xlsx` or `.csv` with the columns `Source name`, `KPI name`, `Link` (the dialog offers a template). The preview marks each row as new, existing, duplicate (skipped) or invalid before anything is created.
+- **Import from Excel/CSV**: a `.xlsx` or `.csv` with the columns `Source name`, `KPI name`, `Link` and optionally `Key name` (see Keys below; the dialog offers a template). The preview marks each row as new, existing, duplicate (skipped) or invalid before anything is created.
 - **Renaming a KPI** keeps its current value but starts its change history fresh: past changes stay in the change feed and run details under the old name, while the explorer and KPI frequency count only changes recorded after the rename.
 - **First check**: a new KPI's first check only records a baseline; no change alert is sent. Alerts (and Mattermost messages) start with the second check that finds a change; built-in sources still post a one-line "baseline loaded" note. The Mattermost message lists the changed KPI pages with a short `+`/`-` excerpt in a code block (page text is shown as code, so it cannot format the message or @mention anyone).
 - **Politeness and safety**: `robots.txt` is respected, requests are limited to 1 per second per host, and links to internal addresses (loopback, private ranges) are blocked unless the host is listed in `WATCH_ALLOWED_HOSTS`. Redirects are re-checked on every hop. In browser mode, Chromium sends all its traffic (page, images, scripts, redirects, HTTPS and WebSockets) through a small built-in proxy that applies the same block, and WebRTC UDP is disabled.
@@ -132,7 +132,30 @@ Additional environment variables:
 | Variable | Default | Meaning |
 |---|---|---|
 | `WATCH_ALLOWED_HOSTS` | empty | Comma-separated hosts exempt from the internal-address block (for example `127.0.0.1,localhost` for local testing) |
+| `KPI_SECRET_KEY` | empty | Encrypts stored keys; required to save or use keys (see Keys) |
 | `KPI_CHROMIUM_PATH` | empty | Chromium executable used for "needs a browser" KPIs; empty uses Playwright's own browser |
+
+## Keys
+
+A key lets a KPI link read pages or APIs that need a login or an API token. Keys live in Settings → Keys; a KPI (or a built-in source that supports it) then picks one from its "Key" list. Three types: a header (for example `Authorization: Bearer ...` or `X-Api-Key`), a link parameter (`?api_key=...`), and username and password (HTTP Basic).
+
+**Set `KPI_SECRET_KEY` first.** Secrets are stored encrypted with it. Without it, Settings → Keys shows a setup note, saving a key returns 503, and any fetch that needs a key fails with `key unavailable (KPI_SECRET_KEY not set)`. Generate one and put it in `.env`:
+
+```sh
+cd backend && uv run python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+```
+
+Any other string also works (it is hashed into a key), but a generated Fernet key is best. Keep it safe and backed up separately from the database.
+
+- **Changing or losing `KPI_SECRET_KEY` makes every stored key unreadable.** They show "Needs re-entry" in Settings; re-enter each secret with "Replace secret". Nothing else is lost.
+- **https only.** A key is only ever sent over `https://`; saving a KPI that has a key and an `http://` link is refused.
+- **Same host only.** If a link redirects to a different host, the key is dropped for that hop (it is kept on same-host redirects).
+- **Not with "Needs a browser" yet.** That combination is refused.
+- **Rejected keys.** If the site answers 401 or 403 to a request that carried a key, the KPI shows "Key rejected" and counts as "not checked" in the run's `incomplete:` summary. Replace the secret to fix it. If every KPI of a source is rejected, the run fails.
+- **Deleting.** A key that is still used by a KPI or source cannot be deleted; the message lists where it is used.
+- **Secrets stay secret.** They never appear in API responses, logs, run errors, snapshots, raw files, previews or Mattermost messages (a stored secret is replaced by `***` if a site echoes it back).
+- **Import.** The CSV/Excel import accepts an optional fourth column, `Key name` (matched ignoring case and spaces). An unknown name marks the row invalid (`unknown key: ...`).
+- **Built-in sources.** Per-source keys appear only for connectors that declare key hosts.
 
 ## Attribution
 
@@ -163,3 +186,30 @@ kill $API_PID $WORKER_PID $WEB_PID                 # stop the three background s
 Set `KPI_CHROMIUM_PATH` to a Chromium executable if Playwright's own browser is not installed; the smoke test and the worker's "needs a browser" KPIs both use it.
 
 The test serves its own page on 127.0.0.1:8765 (`E2E_PAGE_PORT`), removes the KPIs it creates (also on failure or Ctrl-C), and waits up to 90 s per run for the worker.
+
+### Keys end-to-end test
+
+`frontend/tests/e2e/keys.mjs` (`npm run e2e:keys`) adds a header key in the UI, adds a KPI that uses it, tests the link, runs it, then replaces the secret with a wrong one and checks "Key rejected" plus the `incomplete:` warning. Finally it searches the database, raw files, Mattermost bodies and logs for both secrets. It needs the same stack as above, plus:
+
+- a self-signed certificate for `localhost`; the test serves a small HTTPS stub on 127.0.0.1:8443 (`E2E_KEYS_PORT`) that answers 200 only when it sees the right `X-Api-Key`, else 401;
+- the api and worker (only those processes) trusting that certificate through `SSL_CERT_FILE`, which httpx honours: point it at the system CA bundle plus the self-signed certificate;
+- a generated `KPI_SECRET_KEY` for the run.
+
+```sh
+D=/tmp/kpi-keys-e2e && mkdir -p $D
+openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj "/CN=localhost" -addext "subjectAltName=DNS:localhost" -keyout $D/localhost.key -out $D/localhost.crt
+cat /etc/ssl/certs/ca-certificates.crt $D/localhost.crt > $D/bundle.pem
+
+export WATCH_ALLOWED_HOSTS=127.0.0.1,localhost   # the stub is on localhost
+export KPI_SECRET_KEY=$(cd backend && uv run python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())")
+# plus DATABASE_URL, DASHBOARD_PASSWORD, RAW_DIR as above, and MATTERMOST_WEBHOOK_URL pointing at your stub
+
+# SSL_CERT_FILE only for these two processes, never exported to the shell:
+(cd backend && SSL_CERT_FILE=$D/bundle.pem exec uv run uvicorn app.api.main:app --port 8000 > $D/api.log 2>&1) & API_PID=$!
+(cd backend && SSL_CERT_FILE=$D/bundle.pem exec uv run python -m app.worker > $D/worker.log 2>&1) & WORKER_PID=$!
+
+(cd frontend && E2E_KEYS_CERT_DIR=$D E2E_MM_LOG=/tmp/mm.log E2E_LOG_FILES=$D/api.log,$D/worker.log \
+  E2E_PSQL_URL=postgresql://kpi:kpi@localhost:5432/kpi npm run e2e:keys)
+```
+
+The leak scan always covers every place, so these are all required (the test exits with code 2 and names what is missing): `RAW_DIR` (the raw files), `E2E_MM_LOG` (a file your Mattermost stub appends request bodies to), `E2E_LOG_FILES` (comma-separated api/worker log files), `E2E_PSQL_URL` (a plain `postgresql://` URL; needs `psql`) and `E2E_KEYS_CERT_DIR`. The test removes its KPIs and key afterwards; the empty custom source it created stays (there is no API to delete a source).

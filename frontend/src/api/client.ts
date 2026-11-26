@@ -6,8 +6,11 @@ export { clearPassword, hasPassword, setPassword }
 export class ApiError extends Error {
   status: number
   detail: string
-  constructor(status: number, detail: string) {
+  /** Parsed JSON error body (e.g. the used_by list of a 409), when there was one. */
+  body: unknown
+  constructor(status: number, detail: string, body: unknown = null) {
     super(detail)
+    this.body = body
     this.name = 'ApiError'
     this.status = status
     this.detail = detail
@@ -71,7 +74,7 @@ async function request<T>(url: string, init: RequestInit & { headers: Record<str
       body = text
     }
   }
-  if (!res.ok) throw new ApiError(res.status, detailOf(body, res.statusText || `HTTP ${res.status}`))
+  if (!res.ok) throw new ApiError(res.status, detailOf(body, res.statusText || `HTTP ${res.status}`), body)
   return body as T
 }
 

@@ -1,13 +1,15 @@
 <script setup lang="ts">
 import { onMounted, reactive, ref } from 'vue'
 import { ApiError, apiGet, apiSend } from '../../api/client'
-import type { RunNowResult, Source, SourcePatchResult } from '../../api/types'
+import type { RunNowResult, Source, SourcePatchResult, StoredKey } from '../../api/types'
+import { fetchKeys } from '../../composables/useKeys'
 import StatusBadge from '../../components/StatusBadge.vue'
 import { useToast } from '../../composables/useToast'
 import { absoluteTime, relativeTime } from '../../lib/format'
 
 const { show } = useToast()
 const sources = ref<Source[]>([])
+const keys = ref<StoredKey[]>([])
 const loading = ref(true)
 const error = ref<string | null>(null)
 const cron = reactive<Record<string, string>>({})
@@ -23,9 +25,11 @@ async function load() {
   loading.value = true
   error.value = null
   try {
-    const all = await apiGet<Source[]>('/api/sources')
-    sources.value = all.filter((s) => s.access !== 'watch')
-    for (const s of sources.value) cron[s.slug] = s.cron ?? ''
+    const list = (await apiGet<Source[]>('/api/sources')).filter((s) => s.access !== 'watch')
+    // Keys first: a <select> bound before its options exist would show "None" for a source that has a key.
+    keys.value = list.some((s) => s.credential_supported) ? await fetchKeys() : []
+    sources.value = list
+    for (const s of list) cron[s.slug] = s.cron ?? ''
   } catch (e) {
     error.value = e instanceof ApiError ? e.detail : 'Could not load sources'
   } finally {
@@ -65,6 +69,23 @@ async function toggle(s: Source, ev: Event) {
   await patch(s, { enabled })
 }
 
+async function setKey(s: Source, ev: Event) {
+  const raw = (ev.target as HTMLSelectElement).value
+  const id = raw === '' ? null : Number(raw)
+  busy[s.slug] = true
+  try {
+    const res = await apiSend<SourcePatchResult>('PATCH', `/api/sources/${s.slug}`, { credential_id: id })
+    s.credential_id = res.credential_id ?? id
+    s.credential_name = keys.value.find((k) => k.id === s.credential_id)?.name ?? null
+    show(`${s.name} updated`)
+  } catch (e) {
+    ;(ev.target as HTMLSelectElement).value = s.credential_id === null ? '' : String(s.credential_id)
+    show(e instanceof ApiError ? e.detail : 'Could not save', 'error')
+  } finally {
+    busy[s.slug] = false
+  }
+}
+
 async function runNow(s: Source) {
   busy[s.slug] = true
   try {
@@ -90,13 +111,14 @@ async function runNow(s: Source) {
             <th scope="col">Source</th>
             <th scope="col">Enabled</th>
             <th scope="col">Schedule</th>
+            <th v-if="sources.some((x) => x.credential_supported)" scope="col">Key</th>
             <th scope="col">Last run</th>
             <th scope="col"><span class="sr-only">Actions</span></th>
           </tr>
         </thead>
         <tbody>
-          <tr v-if="loading && !sources.length"><td colspan="5" class="muted state">Loading…</td></tr>
-          <tr v-else-if="!sources.length"><td colspan="5" class="muted state">No built-in sources.</td></tr>
+          <tr v-if="loading && !sources.length"><td colspan="6" class="muted state">Loading…</td></tr>
+          <tr v-else-if="!sources.length"><td colspan="6" class="muted state">No built-in sources.</td></tr>
           <tr v-for="s in sources" :key="s.slug">
             <td><strong>{{ s.name }}</strong></td>
             <td>
@@ -118,6 +140,16 @@ async function runNow(s: Source) {
                 <button v-for="p in PRESETS" :key="p.value" type="button" class="chip" @click="cron[s.slug] = p.value">{{ p.label }}</button>
               </div>
               <p v-if="cronError[s.slug]" :id="`ce-${s.slug}`" class="error-text" role="alert">{{ cronError[s.slug] }}</p>
+            </td>
+            <td v-if="sources.some((x) => x.credential_supported)">
+              <select
+                v-if="s.credential_supported" :value="s.credential_id === null ? '' : String(s.credential_id)" :data-test="`key-${s.slug}`"
+                :aria-label="`${s.name} key`" :disabled="busy[s.slug]" @change="setKey(s, $event)"
+              >
+                <option value="">None</option>
+                <option v-for="k in keys" :key="k.id" :value="String(k.id)">{{ k.name }}</option>
+              </select>
+              <span v-else class="muted" aria-label="No key option">—</span>
             </td>
             <td>
               <template v-if="s.last_run">
