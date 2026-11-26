@@ -301,6 +301,17 @@ describe('BuiltinSources key select', () => {
     await flushPromises()
     expect(apiSend).toHaveBeenCalledWith('PATCH', '/api/sources/a', { credential_id: null })
   })
+
+  it('never offers a login key to a built-in source', async () => {
+    const base = { area: 'x', access: 'api', enabled: true, cron: null, last_run: null, credential_id: null, credential_name: null }
+    apiGet.mockImplementation((p: string) => Promise.resolve(p === '/api/credentials'
+      ? [key(), key({ id: 2, name: 'Portal login', kind: 'login', login_url: 'https://portal.example.com/login' })]
+      : [{ ...base, slug: 'a', name: 'A', credential_supported: true }]))
+    const w = mount(BuiltinSources)
+    await flushPromises()
+    const options = w.get('[data-test=key-a]').findAll('option').map((o) => o.text())
+    expect(options).toEqual(['None', 'Acme token'])
+  })
 })
 
 describe('ImportDialog keys', () => {

@@ -183,8 +183,11 @@ def patch_source(slug: str, body: SourcePatch, session: Session = Depends(get_se
         if body.credential_id is not None:
             if source.access == "watch":
                 raise HTTPException(422, "this source doesn't use keys")
-            if session.get(Credential, body.credential_id) is None:
+            key = session.get(Credential, body.credential_id)
+            if key is None:
                 raise HTTPException(422, "unknown key")
+            if key.kind == "login":  # a login is a browser session, never a request header
+                raise HTTPException(422, "a login can only be used by KPIs")
         source.credential_id = body.credential_id
     session.commit()
     return {"slug": source.slug, "enabled": source.enabled, "cron": source.cron,

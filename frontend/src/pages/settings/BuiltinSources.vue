@@ -27,7 +27,8 @@ async function load() {
   try {
     const list = (await apiGet<Source[]>('/api/sources')).filter((s) => s.access !== 'watch')
     // Keys first: a <select> bound before its options exist would show "None" for a source that has a key.
-    keys.value = list.some((s) => s.credential_supported) ? await fetchKeys() : []
+    // Logins are browser sessions for KPIs only; a built-in source would send the password as a header.
+    keys.value = list.some((s) => s.credential_supported) ? (await fetchKeys()).filter((k) => k.kind !== 'login') : []
     sources.value = list
     for (const s of list) cron[s.slug] = s.cron ?? ''
   } catch (e) {

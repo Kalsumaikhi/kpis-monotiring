@@ -365,11 +365,14 @@ def _key_hosts(connector) -> tuple[str, ...]:
 
 def _load_key(session: Session, credential_id: int) -> creds.Credential:
     try:
-        return creds.load(session, credential_id)
+        cred = creds.load(session, credential_id)
     except creds.KeyUnavailable as e:
         raise _KeyFailure(f"key unavailable ({e})") from None
     except KeyError:
         raise _KeyFailure("key unavailable (key not found)") from None
+    if cred.kind == "login":  # never sent as a header/query value (it is a password)
+        raise _KeyFailure("login keys are only used by KPIs")
+    return cred
 
 
 def _record_key_use(session: Session, credential_id: int | None, error: str | None) -> None:

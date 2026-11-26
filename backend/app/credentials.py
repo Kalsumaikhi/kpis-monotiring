@@ -106,6 +106,8 @@ def _basic_token(cred: Credential) -> str:
 
 
 def apply(cred: Credential, url: str, headers: dict) -> tuple[str, dict]:
+    if cred.kind == "login":  # a login's secret is a password typed into its sign-in page only
+        raise ValueError("login keys are only used by KPIs")
     headers = dict(headers)
     if cred.kind == "query":
         parts = urlsplit(url)
