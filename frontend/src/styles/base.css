@@ -62,7 +62,7 @@ code, .mono { font-family: var(--font-mono); font-size: 0.9em; }
 .btn.secondary:hover:not(:disabled) { border-color: var(--link); filter: none; }
 .btn.danger { background: transparent; color: var(--status-fail); border-color: var(--status-fail); }
 
-input[type='text'], input[type='password'], input[type='search'], select, textarea {
+input[type='text'], input[type='password'], input[type='search'], input[type='date'], select, textarea {
   min-height: 38px; padding: 6px 10px;
   border: 1px solid var(--border); border-radius: var(--radius);
   background: var(--surface); color: var(--text); font: inherit;

@@ -179,6 +179,31 @@ def test_delete_custom_source_removes_everything(client, db_session):
     assert client.delete("/api/custom-sources/custom-acme").status_code == 404
 
 
+def test_delete_custom_source_never_removes_outside_raw_dir(db_session, session_factory):
+    from pathlib import Path
+    from app.api.routes_watch import delete_custom_source
+    outside = Path(get_settings().raw_dir).parent / "outside-keep"
+    outside.mkdir(exist_ok=True)
+    (outside / "f.txt").write_text("x")
+    for slug in ("../outside-keep", "x/../../outside-keep", ".."):
+        db_session.add(Source(slug=slug, name=slug, area="custom", access="watch"))
+        db_session.commit()
+        delete_custom_source(slug, db_session)
+        assert db_session.scalar(select(Source).where(Source.slug == slug)) is None
+        assert (outside / "f.txt").exists()
+
+
+def test_delete_custom_source_with_queued_run_is_safe_for_worker(client, db_session, session_factory):
+    from app.worker import poll_queued_once
+    create(client)
+    sid = db_session.scalar(select(Source.id).where(Source.slug == "custom-acme"))
+    db_session.add(Run(source_id=sid, status="queued", trigger="manual"))
+    db_session.commit()
+    assert client.delete("/api/custom-sources/custom-acme").status_code == 204
+    assert db_session.scalars(select(Run)).all() == []
+    assert poll_queued_once(session_factory, None) == 0
+
+
 def test_delete_custom_source_refuses_builtin(client, db_session):
     db_session.add(Source(slug="wdi", name="WDI", area="economic", access="api"))
     db_session.commit()

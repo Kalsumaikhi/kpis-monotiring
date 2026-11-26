@@ -197,6 +197,20 @@ describe('CustomSources', () => {
     w.unmount()
   })
 
+  it('after a delete the section is gone and focus lands on Add KPI', async () => {
+    apiGet.mockResolvedValueOnce(custom()).mockResolvedValue([])
+    apiSend.mockResolvedValue(null)
+    const w = mount(CustomSources, { attachTo: document.body })
+    await flushPromises()
+    expect(w.find('section[aria-label=Acme]').exists()).toBe(true)
+    await w.get('[data-test=delete-source-custom-acme]').trigger('click')
+    dialogBtn('Delete source').click()
+    await flushPromises()
+    expect(w.find('section[aria-label=Acme]').exists()).toBe(false)
+    expect(document.activeElement).toBe(w.get('[data-test=add]').element)
+    w.unmount()
+  })
+
   it('delete source cancel sends nothing; a 409 is shown inline', async () => {
     apiGet.mockResolvedValue(custom())
     const w = mount(CustomSources, { attachTo: document.body })
@@ -211,6 +225,8 @@ describe('CustomSources', () => {
     await flushPromises()
     expect(w.get('[data-test=source-error-custom-acme]').text()).toContain('a check is running for this source')
     expect(w.find('[data-test=delete-source-custom-acme]').exists()).toBe(true)
+    expect((w.get('[data-test=delete-source-custom-acme]').element as HTMLButtonElement).disabled).toBe(false)
+    expect(document.activeElement).toBe(w.get('[data-test=delete-source-custom-acme]').element)
     w.unmount()
   })
 

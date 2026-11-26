@@ -274,9 +274,14 @@ def delete_custom_source(slug: str, session: Session = Depends(get_session)):
         session.execute(delete(Run).where(Run.source_id == sid))
         session.execute(delete(Source).where(Source.id == sid))
         session.commit()
+    raw_root = Path(get_settings().raw_dir).resolve()
     for f in raw_files:
-        Path(f).unlink(missing_ok=True)
-    shutil.rmtree(Path(get_settings().raw_dir) / slug, ignore_errors=True)
+        fp = Path(f).resolve()
+        if fp.is_relative_to(raw_root):
+            fp.unlink(missing_ok=True)
+    d = (raw_root / slug).resolve()
+    if d.parent == raw_root:  # a direct child of raw_dir only; never follow a slug out of it
+        shutil.rmtree(d, ignore_errors=True)
 
 
 @router.patch("/watch-targets/{target_id}")

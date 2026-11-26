@@ -199,7 +199,7 @@ def test_runs_filter_area(client, db_session):
     r = client.get("/api/runs?area=military").json()
     assert r["total"] == 2 and {i["source"] for i in r["items"]} == {"mil"}
     assert client.get("/api/runs?area=economic").json()["total"] == 2
-    assert client.get("/api/runs?area=custom").json()["total"] == 0
+    assert client.get("/api/runs?area=custom").status_code == 422  # no source has that area
     assert client.get("/api/runs").json()["total"] == 4
 
 
@@ -212,6 +212,19 @@ def test_runs_filter_change_type(client, db_session):
     assert removed["total"] == 1 and removed["items"][0]["removed"] == 3
     both = client.get("/api/runs?change=altered&area=military").json()
     assert both["total"] == 1
+
+
+def test_runs_filter_area_is_dynamic(client, db_session):
+    _mixed_runs(db_session)
+    soc = Source(slug="soc", name="Soc", area="social", access="api")
+    db_session.add(soc)
+    db_session.flush()
+    db_session.add(Run(source_id=soc.id, status="ok", added=1))
+    db_session.commit()
+    r = client.get("/api/runs?area=social")
+    assert r.status_code == 200 and r.json()["total"] == 1
+    bad = client.get("/api/runs?area=xyz")
+    assert bad.status_code == 422 and "unknown area" in bad.json()["detail"]
 
 
 def test_runs_filter_unknown_area_422(client, db_session):

@@ -9,7 +9,8 @@ import StatusBadge from '../components/StatusBadge.vue'
 import { absoluteTime, fmtNum, relativeTime } from '../lib/format'
 
 const PAGE_SIZE = 50
-const AREAS = [['economic', 'Economic'], ['military', 'Military'], ['custom', 'Custom sources']] as const
+const AREA_LABELS: Record<string, string> = { custom: 'Custom sources' }
+const areaLabel = (a: string) => AREA_LABELS[a] ?? a.charAt(0).toUpperCase() + a.slice(1)
 const CHANGES = [['added', 'Added'], ['altered', 'Altered'], ['removed', 'Removed']] as const
 const STATUSES = ['ok', 'baseline', 'no_change', 'failed', 'suspect_pending', 'approve_queued', 'rejected', 'superseded', 'blocked', 'running', 'queued']
 
@@ -17,6 +18,7 @@ const route = useRoute()
 const router = useRouter()
 
 const sources = ref<Source[]>([])
+const areas = computed(() => [...new Set(sources.value.map((s) => s.area).filter(Boolean))].sort())
 const rows = ref<Run[]>([])
 const total = ref(0)
 const loading = ref(true)
@@ -110,7 +112,7 @@ function open(r: Run) { router.push(`/runs/${r.id}`) }
         <label for="f-area">Area</label>
         <select id="f-area" :value="filters.area" @change="setFilter({ area: ($event.target as HTMLSelectElement).value })">
           <option value="">All areas</option>
-          <option v-for="[v, label] in AREAS" :key="v" :value="v">{{ label }}</option>
+          <option v-for="a in areas" :key="a" :value="a">{{ areaLabel(a) }}</option>
         </select>
       </div>
       <div class="field">

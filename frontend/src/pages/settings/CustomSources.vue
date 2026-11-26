@@ -114,10 +114,14 @@ async function doDeleteSource() {
     await apiSend('DELETE', `/api/custom-sources/${encodeURIComponent(s.slug)}`)
     show(`${s.name} deleted`)
     await load()
+    sourceBusy.value = null
+    await nextTick()
+    addBtn.value?.focus() // the section the focus was in is gone
   } catch (e) {
     sourceErrors.value[s.slug] = e instanceof ApiError ? e.detail : 'Could not delete the source'
-  } finally {
     sourceBusy.value = null
+    await nextTick() // the button is enabled again, so it can take focus back
+    document.querySelector<HTMLElement>(`[data-test=delete-source-${s.slug}]`)?.focus()
   }
 }
 

@@ -50,8 +50,6 @@ def _run_or_404(session: Session, run_id: int) -> tuple[Run, str]:
     return row[0], row[1]
 
 
-# The distinct sources.area values: the connectors' areas plus "custom" for watch sources.
-Area = Literal["economic", "military", "custom"]
 ChangeKind = Literal["added", "altered", "removed"]
 
 
@@ -61,7 +59,7 @@ def list_runs(
     status: str | None = None,
     since: datetime | None = None,
     has_changes: bool = False,
-    area: Area | None = None,
+    area: str | None = None,
     change: ChangeKind | None = None,
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
@@ -76,7 +74,9 @@ def list_runs(
         q = q.where(Run.started_at >= since)
     if has_changes:
         q = q.where(Run.added + Run.altered + Run.removed > 0)
-    if area:
+    if area is not None:
+        if area not in set(session.scalars(select(Source.area).distinct())):
+            raise HTTPException(422, "unknown area")
         q = q.where(Source.area == area)
     if change:
         q = q.where(getattr(Run, change) > 0)
