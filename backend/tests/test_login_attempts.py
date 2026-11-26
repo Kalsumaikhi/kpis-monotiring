@@ -32,6 +32,7 @@ from app.connectors.watch import fetch as fetch_mod
 from app.connectors.watch.fetch import FetchResult
 from app.core import pipeline
 from app.models import Credential, LoginAttempt, LoginSession, Run, Source, WatchTarget
+from tests.conftest import api_client
 
 AUTH = ("anyone", "secret")
 USER = "me@example.com"
@@ -66,7 +67,7 @@ def make_client(get_session, factory, monkeypatch) -> TestClient:
     app = create_app()
     app.dependency_overrides[deps.get_session] = get_session
     app.dependency_overrides[deps.get_session_factory] = lambda: factory
-    c = TestClient(app)
+    c = api_client(app)
     c.auth = AUTH
     return c
 

@@ -8,7 +8,6 @@ import httpx
 import pytest
 import respx
 from cryptography.fernet import Fernet
-from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from app import credentials as creds
@@ -19,6 +18,7 @@ from app.connectors.watch import fetch as fetch_mod
 from app.connectors.watch.fetch import fetch_target
 from app.core import pipeline
 from app.models import Credential, Run, Source, WatchSnapshot, WatchTarget
+from tests.conftest import api_client
 
 AUTH = ("anyone", "secret")
 SECRET = "sk-super-secret+/123"
@@ -44,7 +44,7 @@ def client(db_session, session_factory, monkeypatch):
     app = create_app()
     app.dependency_overrides[deps.get_session] = lambda: db_session
     app.dependency_overrides[deps.get_session_factory] = lambda: session_factory
-    c = TestClient(app)
+    c = api_client(app)
     c.auth = AUTH
     return c
 

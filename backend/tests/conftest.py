@@ -2,6 +2,7 @@ import os
 from pathlib import Path
 
 import pytest
+from fastapi.testclient import TestClient
 from alembic import command
 from alembic.config import Config
 from sqlalchemy import create_engine, text
@@ -15,6 +16,13 @@ from app.models import Run, Source
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 TEST_DATABASE_URL = os.environ.get("TEST_DATABASE_URL")
+# Every unsafe /api call must carry this header (CSRF guard in app.api.main).
+CSRF_HEADERS = {"X-Requested-With": "kpi-monitor"}
+
+
+def api_client(app) -> TestClient:
+    """TestClient that sends the CSRF header by default, as the frontend does."""
+    return TestClient(app, headers=CSRF_HEADERS)
 
 
 @pytest.fixture(scope="session")

@@ -2,7 +2,6 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
-from fastapi.testclient import TestClient
 from sqlalchemy import select, text
 
 from app.api import deps
@@ -12,7 +11,7 @@ from app.core import rollup
 from app.models import Change, ChangeRollup, DataPoint, Indicator, Run, Source
 from app.core.canonical import RawRow, to_canonical
 from app.core.diff import apply_diff, stage_rows
-from tests.conftest import row, seed
+from tests.conftest import api_client, row, seed
 
 
 @pytest.fixture
@@ -21,7 +20,7 @@ def client(db_session, session_factory, monkeypatch):
     app = create_app()
     app.dependency_overrides[deps.get_session] = lambda: db_session
     app.dependency_overrides[deps.get_session_factory] = lambda: session_factory
-    c = TestClient(app)
+    c = api_client(app)
     c.auth = ("u", "secret")
     return c
 

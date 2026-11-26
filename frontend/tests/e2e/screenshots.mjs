@@ -21,7 +21,7 @@ let html = '<html><body><h1>Pricing</h1><p>Plan A costs 10 EUR</p></body></html>
 const server = http.createServer((q, r) => { r.writeHead(q.url === '/robots.txt' ? 404 : 200, { 'content-type': 'text/html' }); r.end(q.url === '/robots.txt' ? '' : html) }).listen(PORT, '127.0.0.1')
 
 const api = async (p, method = 'GET', body) => {
-  const r = await fetch(BASE + p, { method, headers: { authorization: AUTH, ...(body ? { 'content-type': 'application/json' } : {}) }, body: body && JSON.stringify(body) })
+  const r = await fetch(BASE + p, { method, headers: { authorization: AUTH, 'x-requested-with': 'kpi-monitor', ...(body ? { 'content-type': 'application/json' } : {}) }, body: body && JSON.stringify(body) })
   if (!r.ok) throw new Error(`${method} ${p} -> ${r.status} ${await r.text()}`)
   return r.status === 204 ? null : r.json()
 }

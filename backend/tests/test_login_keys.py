@@ -1,6 +1,5 @@
 import pytest
 from cryptography.fernet import Fernet
-from fastapi.testclient import TestClient
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
@@ -8,6 +7,7 @@ from app import credentials as creds
 from app.api import deps
 from app.api.main import create_app
 from app.config import get_settings
+from tests.conftest import api_client
 
 PASSWORD = "hunter2-password"
 
@@ -23,7 +23,7 @@ def client(db_session, session_factory, monkeypatch):
     app = create_app()
     app.dependency_overrides[deps.get_session] = lambda: db_session
     app.dependency_overrides[deps.get_session_factory] = lambda: session_factory
-    c = TestClient(app)
+    c = api_client(app)
     c.auth = ("anyone", "secret")
     return c
 

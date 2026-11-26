@@ -64,6 +64,12 @@ The KPI frequency and explorer views read per-day counts from `change_rollup`. M
 
 `GET /api/health` is public. All other routes need HTTP Basic auth (any username, password = `DASHBOARD_PASSWORD`).
 
+Every POST, PUT, PATCH and DELETE under `/api/` must also send `X-Requested-With: kpi-monitor`, or the api answers 403 `missing X-Requested-With`. Browsers resend Basic auth on a form post from another site, but such a form cannot set this header, so it blocks cross-site requests. The dashboard sends it on every call. When scripting with curl:
+
+```sh
+curl -u x:$DASHBOARD_PASSWORD -H 'X-Requested-With: kpi-monitor' -X POST localhost:8000/api/sources/{slug}/run
+```
+
 - `GET /api/sources`, `PATCH /api/sources/{slug}`, `POST /api/sources/{slug}/run`
 - `GET /api/runs`, `GET /api/runs/{id}`, `GET /api/runs/{id}/changes`
 - `POST /api/runs/{id}/approve`, `POST /api/runs/{id}/reject`

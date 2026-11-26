@@ -5,7 +5,12 @@ describe('safeNext', () => {
   it.each([
     ['/x', '/x'],
     ['/x?a=1#h', '/x?a=1#h'],
+    ['/feed?x=1', '/feed?x=1'],
     ['//evil.com', '/'],
+    ['/.//evil.com', '/'],
+    ['/./\\evil.com', '/'],
+    ['/%2F/evil.com', '/%2F/evil.com'],
+    ['javascript:alert(1)', '/'],
     ['/\\evil.com', '/'],
     ['/\t/evil.com', '/'],
     ['https://evil.com', '/'],

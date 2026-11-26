@@ -31,7 +31,7 @@ const server = http.createServer((req, res) => {
 }).listen(PAGE_PORT, '127.0.0.1')
 
 const api = async (p, init = {}) => {
-  const r = await fetch(BASE + p, { ...init, headers: { authorization: AUTH, ...(init.headers || {}) } })
+  const r = await fetch(BASE + p, { ...init, headers: { authorization: AUTH, 'x-requested-with': 'kpi-monitor', ...(init.headers || {}) } })
   if (!r.ok) throw new Error(`${p} -> ${r.status}`)
   return r.status === 204 ? null : r.json()
 }

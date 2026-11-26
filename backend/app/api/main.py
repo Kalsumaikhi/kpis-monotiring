@@ -9,9 +9,22 @@ from app.api import (
 )
 from app.api.deps import require_auth
 
+UNSAFE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+CSRF_HEADER, CSRF_VALUE = "X-Requested-With", "kpi-monitor"
+
 
 def create_app() -> FastAPI:
     app = FastAPI(title="KPI Monitor", docs_url=None, redoc_url=None, openapi_url=None)
+
+    @app.middleware("http")
+    async def require_requested_with(request: Request, call_next):
+        # CSRF guard. Auth is HTTP Basic, which browsers resend on cross-site form posts; a
+        # custom header cannot be set cross-site without a CORS preflight, which this app never
+        # grants. Runs before routing, so it refuses before auth (401) or 404/405.
+        if (request.method in UNSAFE_METHODS and request.url.path.startswith("/api/")
+                and request.headers.get(CSRF_HEADER) != CSRF_VALUE):
+            return JSONResponse({"detail": "missing X-Requested-With"}, status_code=403)
+        return await call_next(request)
 
     @app.exception_handler(RequestValidationError)
     async def validation_error(request: Request, exc: RequestValidationError):

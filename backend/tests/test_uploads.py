@@ -1,7 +1,6 @@
 from pathlib import Path
 
 import pytest
-from fastapi.testclient import TestClient
 
 from app.api import deps
 from app.api.main import create_app
@@ -10,7 +9,7 @@ from app.connectors.registry import CONNECTORS
 from app.core.canonical import RawRow
 from app.models import PendingChange, Run, Source, Upload
 from app.worker import poll_queued_once
-from tests.conftest import FakeConnector
+from tests.conftest import FakeConnector, api_client
 
 
 @pytest.fixture
@@ -19,7 +18,7 @@ def client(db_session, session_factory, monkeypatch):
     app = create_app()
     app.dependency_overrides[deps.get_session] = lambda: db_session
     app.dependency_overrides[deps.get_session_factory] = lambda: session_factory
-    c = TestClient(app)
+    c = api_client(app)
     c.auth = ("u", "secret")
     return c
 

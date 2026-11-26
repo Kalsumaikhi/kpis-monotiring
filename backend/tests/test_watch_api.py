@@ -5,7 +5,6 @@ import httpx
 import openpyxl
 import pytest
 import respx
-from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 
 from app import watch_import
@@ -15,6 +14,7 @@ from app.config import get_settings
 from app.connectors.watch import fetch as fetch_mod
 from app.core import pipeline
 from app.models import Change, DataPoint, ImportPreview, Indicator, Run, Source, WatchSnapshot, WatchTarget
+from tests.conftest import api_client
 
 AUTH = ("anyone", "secret")
 
@@ -38,7 +38,7 @@ def client(db_session, session_factory, monkeypatch):
     app = create_app()
     app.dependency_overrides[deps.get_session] = lambda: db_session
     app.dependency_overrides[deps.get_session_factory] = lambda: session_factory
-    c = TestClient(app)
+    c = api_client(app)
     c.auth = AUTH
     return c
 
