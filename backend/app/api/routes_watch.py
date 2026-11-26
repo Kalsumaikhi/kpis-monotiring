@@ -290,8 +290,10 @@ def _apply_patch(session: Session, t: WatchTarget, body: TargetPatch, new_name: 
         for f in ("kind", "use_browser"):
             if f in body.model_fields_set and getattr(body, f) is not None:
                 setattr(t, f, getattr(body, f))
-        if "credential_id" in body.model_fields_set:
-            t.credential_id = body.credential_id
+        if "credential_id" in body.model_fields_set and body.credential_id != t.credential_id:
+            # Like a re-point: with a different key (or none) the page may show different
+            # content (a teaser vs the full page), so the next check is a silent baseline.
+            t.credential_id, t.needs_baseline = body.credential_id, True
         if "selector" in body.model_fields_set:
             t.selector = body.selector or None
         if supersede:

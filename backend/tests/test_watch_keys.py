@@ -487,3 +487,61 @@ def test_all_targets_rejected_names_key_in_run_error_and_alert(wenv, db_session)
     assert SECRET not in run.error
     db_session.expire_all()
     assert db_session.get(Credential, c.id).last_error == "key rejected (HTTP 401)"
+
+
+@respx.mock
+def test_changing_key_rebaselines_without_alert(wenv, db_session, client):
+    src, sf = wenv
+    c = mk_cred(db_session)
+    t = add_target(db_session, src, None)
+    robots()
+    route = respx.get("https://h.example/p").mock(return_value=httpx.Response(
+        200, text="<main>teaser</main>", headers={"content-type": "text/html"}))
+    sent = []
+
+    class Rec:
+        def notify_run(self, run, source, top, streak, extras=None):
+            sent.append((run.status, run.added + run.altered + run.removed, extras))
+
+    assert pipeline.run_source(sf, "custom-x", notifier=Rec()).status == "baseline"
+    db_session.expire_all()
+    assert db_session.get(WatchTarget, t.id).needs_baseline is False
+    r = client.patch(f"/api/watch-targets/{t.id}", json={"credential_id": c.id})
+    assert r.status_code == 200
+    db_session.expire_all()
+    assert db_session.get(WatchTarget, t.id).needs_baseline is True
+    route.mock(return_value=httpx.Response(
+        200, text="<main>full private page</main>", headers={"content-type": "text/html"}))
+    sent.clear()
+    run = pipeline.run_source(sf, "custom-x", notifier=Rec())
+    assert route.calls[-1].request.headers["X-Key"] == SECRET
+    assert run.added + run.altered + run.removed == 0
+    assert not any((extras or {}).get("page_kpis") for _, _, extras in sent)
+    db_session.expire_all()
+    assert db_session.get(WatchTarget, t.id).needs_baseline is False
+    # an unchanged key in a PATCH is not a change; clearing it is
+    client.patch(f"/api/watch-targets/{t.id}", json={"credential_id": c.id})
+    db_session.expire_all()
+    assert db_session.get(WatchTarget, t.id).needs_baseline is False
+    client.patch(f"/api/watch-targets/{t.id}", json={"credential_id": None})
+    db_session.expire_all()
+    assert db_session.get(WatchTarget, t.id).needs_baseline is True
+
+
+def test_key_changed_during_run_keeps_needs_baseline(wenv, db_session, tmp_path):
+    from app.connectors.watch.connector import WatchConnector
+    src, sf = wenv
+    c = mk_cred(db_session)
+    t = add_target(db_session, src, c)
+    t.needs_baseline = True
+    raw = tmp_path / "r.json"
+    raw.write_text(json.dumps({"targets": [{
+        "id": t.id, "kpi_name": "Price", "url": t.url, "kind": "page", "credential_id": None,
+        "needs_baseline": True, "status": "ok", "content_type": "text/html", "error": None,
+        "text": "x", "sha256": "0" * 64}]}))
+    run = Run(source_id=src.id, status="baseline", trigger="manual", raw_path=str(raw))
+    db_session.add(run)
+    db_session.flush()
+    WatchConnector(src.id, "custom-x", "X", sf).after_run(db_session, run)
+    db_session.expire_all()
+    assert db_session.get(WatchTarget, t.id).needs_baseline is True
