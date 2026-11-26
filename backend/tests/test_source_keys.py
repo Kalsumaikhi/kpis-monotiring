@@ -330,3 +330,65 @@ def test_patch_watch_source_credential_422(db_session, client):
     r = client.patch("/api/sources/w", json={"credential_id": cred.id})
     assert r.status_code == 422 and r.json()["detail"] == "this source doesn't use keys"
     assert client.patch("/api/sources/w", json={"credential_id": None}).status_code == 200
+
+
+def test_raw_file_is_scrubbed_when_download_fails(env, db_session):
+    src, conn, sf = env
+    _keyed(db_session, src)
+    seen = {}
+
+    def dl(client, dest):
+        dest.write_text(f"partial {SECRET} data")
+        dest.with_name(dest.name + ".part").write_text(f"tmp {SECRET}")
+        seen["dest"] = dest
+        raise RuntimeError("connection dropped")
+
+    conn.download = dl
+    run = pipeline.run_source(sf, "fake")
+    assert run.status == "failed" and "connection dropped" in run.error
+    dest = seen["dest"]
+    assert SECRET not in dest.read_text() and "***" in dest.read_text()
+    part = dest.with_name(dest.name + ".part")
+    assert SECRET not in part.read_text()
+
+
+def test_raw_file_is_scrubbed_when_key_rejected(env, db_session):
+    src, conn, sf = env
+    _keyed(db_session, src)
+    respx.mock.start()
+    try:
+        respx.get("https://api.example.com/data").mock(return_value=httpx.Response(401))
+
+        def dl(client, dest):
+            client.get("https://api.example.com/data")
+            dest.write_text(f"echo {SECRET}")
+
+        conn.download = dl
+        run = pipeline.run_source(sf, "fake")
+    finally:
+        respx.mock.stop()
+    assert run.error == "key rejected (HTTP 401)"
+    assert SECRET not in open(run.raw_path).read()
+
+
+def test_no_open_transaction_during_download(env, db_session, monkeypatch):
+    src, conn, sf = env
+    _keyed(db_session, src)
+    sessions = []
+    real = pipeline._load_key
+
+    def spy(session, cid):
+        sessions.append(session)
+        return real(session, cid)
+
+    monkeypatch.setattr(pipeline, "_load_key", spy)
+    during = []
+
+    def dl(client, dest):
+        during.append(sessions[0].in_transaction())
+        dest.write_text("raw")
+
+    conn.download = dl
+    run = pipeline.run_source(sf, "fake")
+    assert run.status == "baseline", run.error
+    assert during == [False]

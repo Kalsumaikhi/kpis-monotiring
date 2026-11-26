@@ -368,6 +368,23 @@ def _record_key_use(session: Session, credential_id: int | None, error: str | No
         log.warning("could not record use of key %s", credential_id)
 
 
+def _scrub_raw(dest: Path, cred: creds.Credential) -> None:
+    """Redact the secret from the raw file (and a leftover `.part`), if present."""
+    for path in (dest, dest.with_name(dest.name + ".part")):
+        try:
+            if path.exists():
+                data = path.read_bytes()
+                clean = creds.redact_bytes(data, cred)
+                if clean != data:
+                    path.write_bytes(clean)
+        except OSError:
+            log.warning("could not scrub raw file %s; deleting it", path.name)
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                log.error("could not delete unscrubbed raw file %s", path.name)
+
+
 def run_source(
     session_factory: SessionFactory,
     slug: str,
@@ -423,6 +440,9 @@ def run_source(
                 hooks: dict = {}
                 if key_id is not None:
                     cred = _load_key(session, key_id)
+                    # End the read transaction now: the session must not sit idle in a
+                    # transaction during a long download (nothing below relies on it).
+                    session.commit()
                     state = _KeyState(cred, _key_hosts(connector))
                     hooks = {"request": [state.on_request], "response": [state.on_response]}
                 try:
@@ -432,13 +452,11 @@ def run_source(
                     if state is not None and state.rejected is not None:
                         raise _KeyFailure(f"key rejected (HTTP {state.rejected})") from None
                     raise
+                finally:  # the raw file must not hold the secret, whether or not download failed
+                    if cred is not None:
+                        _scrub_raw(dest, cred)
                 if state is not None and state.rejected is not None:
                     raise _KeyFailure(f"key rejected (HTTP {state.rejected})")
-                if cred is not None and dest.exists():  # the raw file must not hold the secret
-                    data = dest.read_bytes()
-                    clean = creds.redact_bytes(data, cred)
-                    if clean != data:
-                        dest.write_bytes(clean)
         except Exception as e:  # noqa: BLE001
             if isinstance(e, _KeyFailure):
                 key_error = str(e)
