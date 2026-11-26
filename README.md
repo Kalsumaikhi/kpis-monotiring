@@ -265,8 +265,8 @@ The leak scan always covers every place, so these are all required (the test exi
 
 1. adds a login (through the API);
 2. adds a KPI on the protected page;
-3. runs it: the site asks for a code, so the KPI becomes "Login needed" and exactly one Mattermost message is sent (a second run sends no more);
-4. clicks "Sign in now" in the dashboard, types the code from the file into the dialog, and waits for "Signed in"; the KPI is then checked straight away (a baseline);
+3. runs it: the site asks for a code, so the KPI becomes "Login needed" and exactly one Mattermost post is sent for the source, the sign-in message (a second run sends nothing: no "check failed");
+4. clicks "Sign in now" in the dashboard, types a wrong code (the dialog says it was not accepted), clicks "Try again", types the new code from the file, and waits for "Signed in"; the KPI is then checked straight away (a baseline);
 5. changes the protected page and runs it: `ok`, with a `+` excerpt, reusing the saved session;
 6. makes the site sign everyone out and stop asking for codes: the next run signs in again by itself;
 7. searches the database, raw files, Mattermost bodies, logs and API responses for the password, every code and every session cookie;

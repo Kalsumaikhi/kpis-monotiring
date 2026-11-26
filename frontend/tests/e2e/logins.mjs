@@ -47,6 +47,7 @@ const SRC = `E2E Logins ${RUN}`
 const KEY_NAME = `E2E login ${RUN}`
 const USER = `e2e-${RUN}@example.test`
 const SECRET_PW = 'e2e-pw-' + crypto.randomBytes(12).toString('hex')
+const WRONG_CODE = 'WRONG-' + crypto.randomBytes(6).toString('hex').toUpperCase() // typed by the "user"; never stored either
 const AUTH = 'Basic ' + Buffer.from(`x:${PASSWORD}`).toString('base64')
 const INBOX = fs.mkdtempSync(path.join(os.tmpdir(), 'kpi-e2e-logins-inbox-'))
 const CODE_FILE = path.join(INBOX, 'code.txt') // the "email": the site writes each code here
@@ -196,6 +197,8 @@ const loginKey = async (id) => (await apiGet('/api/credentials')).find((k) => k.
 // Mattermost "needs you to sign in" messages for this run's login.
 const mmSignInMessages = () => fs.readFileSync(MM_LOG, 'utf8').split('\n')
   .filter((l) => l.includes(`${KEY_NAME} needs you to sign in`)).length
+// Every Mattermost post about this run's source (any kind: sign-in, check failed, changes...).
+const mmSourcePosts = () => fs.readFileSync(MM_LOG, 'utf8').split('\n').filter((l) => l.includes(SRC))
 
 function walk(dir) {
   return fs.readdirSync(dir, { withFileTypes: true }).flatMap((e) =>
@@ -265,6 +268,7 @@ try {
 
   // 3. Run now: the worker signs in by itself, the site asks for a code -> login_needed + ONE message
   const mm0 = mmSignInMessages()
+  const posts0 = mmSourcePosts().length
   await runNow(slug)
   const r1 = await waitFinished(slug, 0)
   let tg = await target()
@@ -275,12 +279,18 @@ try {
   let lk = await loginKey(key.id)
   assert.equal(lk.login_status, 'login_needed', 'the login itself is "login needed"')
   assert.equal(mmSignInMessages() - mm0, 1, 'exactly one Mattermost "needs you to sign in" message')
+  assert.notEqual(r1.status, 'failed', 'waiting for a sign-in is incomplete, not failed (R10)')
   step(3, `Run now -> run #${r1.id} status=${r1.status} (${r1.error}); KPI login_needed; login error: ${lk.login_error}; 1 Mattermost message`)
   // a second run while still waiting: no new sign-in, no new code email, no second message
   await runNow(slug)
   const r1b = await waitFinished(slug, 1)
   assert.equal(site.loginPosts, 1, 'no automatic retry once the site wants a code')
   assert.equal(mmSignInMessages() - mm0, 1, 'still exactly one Mattermost message')
+  assert.notEqual(r1b.status, 'failed', 'still not a failed run')
+  const srcPosts = mmSourcePosts().slice(posts0)
+  assert.equal(srcPosts.length, 1, 'exactly ONE Mattermost post for the source across both runs (no "check failed"): ' + srcPosts.join(' | '))
+  assert.ok(srcPosts[0].includes('needs you to sign in'), 'and it is the sign-in message')
+  assert.ok(!srcPosts[0].includes('incomplete fetch'), 'with no "incomplete fetch" line')
   assert.equal((await target()).last_status, 'login_needed')
   step(3, `second run #${r1b.id} status=${r1b.status}: no new sign-in, still one message`)
 
@@ -299,24 +309,39 @@ try {
   await dialog.locator('#si-code').waitFor({ timeout: 90000 })
   await dialog.locator('[data-test=countdown]').waitFor()
   assert.ok(fs.existsSync(CODE_FILE), 'the site emailed a new code')
-  const code = fs.readFileSync(CODE_FILE, 'utf8').trim()
   await shot(page, 'logins-code.png')
+  // a wrong code first: the dialog says it was not accepted; Try again asks for a (new) code
+  fs.rmSync(CODE_FILE)
+  await dialog.locator('#si-code').fill(WRONG_CODE)
+  await dialog.locator('[data-test=code-submit]').click()
+  const problem = dialog.locator('[data-test=problem]')
+  await problem.waitFor({ timeout: 90000 })
+  assert.match(await problem.innerText(), /not accepted/, 'the dialog says the code was not accepted')
+  assert.equal(site.codePosts, 1, 'the wrong code was typed once')
+  await dialog.locator('[data-test=try-again]').click()
+  await dialog.locator('#si-code').waitFor({ timeout: 90000 })
+  assert.ok(fs.existsSync(CODE_FILE), 'the site emailed another code')
+  const code = fs.readFileSync(CODE_FILE, 'utf8').trim()
   await dialog.locator('#si-code').fill(code)
   await dialog.locator('[data-test=code-submit]').click()
   await dialog.locator('[data-test=succeeded]').waitFor({ timeout: 90000 })
   assert.ok(!(await page.content()).includes(code), 'the code is not left on the page')
-  assert.equal(site.codePosts, 1, 'the worker typed the code once')
+  assert.equal(site.codePosts, 2, 'the worker typed the right code once, after the wrong one')
   await shot(page, 'logins-signed-in.png')
   const att = await apiGet(`/api/logins/${key.id}/attempt`)
   assert.equal(att.status, 'succeeded')
   const r2 = await waitFinished(slug, before4)
-  assert.equal(r2.status, 'baseline', `the KPI is checked automatically, first as a baseline (got ${r2.status}: ${r2.error})`)
+  // The source's first (empty, incomplete) run was its baseline, so the KPI is baselined silently
+  // inside a no_change run: complete, no change alert, nothing posted.
+  assert.ok(['baseline', 'no_change'].includes(r2.status) && !r2.error,
+    `the KPI is checked automatically, first as a silent baseline (got ${r2.status}: ${r2.error})`)
+  assert.equal(mmSourcePosts().length - posts0, 1, 'no Mattermost post for the baseline')
   tg = await target()
   assert.equal(tg.last_status, 'ok', `KPI is ok after signing in (got ${tg.last_status}: ${tg.last_error})`)
   assert.equal((await loginKey(key.id)).login_status, 'ok')
   await dialog.locator('[data-test=close]').click()
   await page.locator(`[data-test=key-${key.id}] [data-test=login-state]`).getByText('Signed in').waitFor({ timeout: 20000 })
-  step(4, `Sign in now -> dialog asked for the code; entered it -> succeeded; run #${r2.id} status=${r2.status}; KPI ok`)
+  step(4, `Sign in now -> dialog asked for the code; a wrong code -> "not accepted"; Try again; the right code -> succeeded; run #${r2.id} status=${r2.status}; KPI ok`)
 
   // 5. the protected page changes -> ok with an excerpt, using the saved session (no new sign-in)
   site.content = 'Plan A costs 12 EUR'
@@ -353,7 +378,7 @@ try {
 
   // 7. nothing leaked: password, every code and every session cookie value
   apiText.push(JSON.stringify([await api('/api/credentials'), await api('/api/custom-sources'), await api('/api/runs?limit=50')]))
-  const secrets = [SECRET_PW, ...site.issued]
+  const secrets = [SECRET_PW, WRONG_CODE, ...site.issued]
   const hits = leakScan(secrets)
   assert.deepEqual(hits, [], 'secret found in: ' + hits.join(', '))
   step(7, `no password, code or cookie (${secrets.length} secrets) in: database, raw files, Mattermost bodies, logs, API responses`)
