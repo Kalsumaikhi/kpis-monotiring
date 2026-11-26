@@ -265,6 +265,9 @@ def patch_credential(cid: int, body: CredentialPatch, session: Session = Depends
             select(WatchTarget.id).where(WatchTarget.credential_id == cid).limit(1)) is not None:
         # Its KPIs are browser KPIs on the login's hosts; another kind cannot serve them.
         raise HTTPException(409, "this login is used by KPIs")
+    if row.kind != "login" and kind == "login" and _used_by(session, [cid]).get(cid):
+        # Its KPIs and sources send it as a header/query/basic value; a login cannot.
+        raise HTTPException(409, "this key is used by KPIs")
     if kind == "header" and row.kind != "header" and "secret" not in data:
         # The stored secret was never checked as a header value; check it now.
         try:

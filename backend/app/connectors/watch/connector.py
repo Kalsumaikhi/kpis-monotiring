@@ -112,7 +112,8 @@ class _Login:
     cred: creds.Credential
     state: dict | None
     version: tuple
-    skip: bool = False  # interactive sign-in running: no browser work at all
+    auto_ok: bool = False  # an automatic sign-in may be tried (see _auto_ok)
+    skip: bool = False  # no more browser work and no session writes this run
     tried: bool = False  # automatic sign-in already tried this run
     dead: str | None = None  # sign-in failed: no further browser work this run
     fetched_ok: bool = False
@@ -215,6 +216,14 @@ class WatchConnector:
             self._alerts.append({"login_name": cred.name, "source": self.name})
 
     @staticmethod
+    def _auto_ok(row) -> bool:
+        """Automatic sign-in only for a working login whose session expired, or a fresh or
+        reset one never tried (login_needed, no error). Never again after it needed a code or
+        failed: no code email every run, no lockout from repeated bad passwords. The user
+        recovers with "Sign in now" or by editing the key (which resets it)."""
+        return row.status == "ok" or (row.status == "login_needed" and row.last_error is None)
+
+    @staticmethod
     def _version(row) -> tuple:
         return (row.status, bytes(row.state_enc) if row.state_enc is not None else None,
                 row.updated_at)
@@ -228,7 +237,8 @@ class WatchConnector:
             session.refresh(row)
         if row.status in INTERACTIVE:
             return _Login(cred, None, self._version(row), skip=True)
-        return _Login(cred, logins.load_state(session, cred), self._version(row))
+        return _Login(cred, logins.load_state(session, cred), self._version(row),
+                      auto_ok=self._auto_ok(row))
 
     def _reload(self, lg: _Login) -> None:
         """The session changed under us (reset, or saved by another run): take the stored one."""
@@ -238,11 +248,14 @@ class WatchConnector:
                 lg.skip = True
                 return
             lg.version = self._version(row)
+            lg.auto_ok = self._auto_ok(row)
             lg.state = logins.load_state(session, lg.cred)
 
-    def _cas(self, lg: _Login, values: dict, into_login_needed: bool = False) -> bool | None:
+    def _cas(self, lg: _Login, values: dict, into_login_needed: bool = False,
+             was: str | None = None) -> bool | None:
         """Write `values` if the session is still as last seen. Returns None when it changed
-        (nothing written); else whether this write claimed the login-needed alert."""
+        (nothing written); else whether this write claimed the login-needed alert. `was` is
+        the status before our own 'signing_in' (else the stored status is used)."""
         status, state_enc, updated_at = lg.version
         with self.session_factory() as session:
             cid = LoginSession.credential_id == lg.cred.id
@@ -257,7 +270,8 @@ class WatchConnector:
                 return None
             values = dict(values)
             # Alert once per transition: never alerted yet, or it was ok since the last alert.
-            alert = into_login_needed and (row.notified_at is None or row.status == "ok")
+            alert = into_login_needed and (row.notified_at is None
+                                           or (was or row.status) == "ok")
             if alert:
                 values["notified_at"] = func.now()
             new = session.execute(
@@ -276,15 +290,38 @@ class WatchConnector:
         if written is None:
             self._reload(lg)
 
-    def _mark_login_needed(self, lg: _Login, error: str) -> None:
+    def _mark_login_needed(self, lg: _Login, error: str, was: str | None = None) -> None:
         alert = self._cas(lg, {"status": "login_needed", "last_error": error},
-                          into_login_needed=True)
+                          into_login_needed=True, was=was)
         if alert:
             self._alert(lg.cred)
 
+    def _bind(self):
+        with self.session_factory() as session:
+            return session.get_bind()
+
     def _sign_in(self, lg: _Login, state: FetchState) -> bool:
-        """One automatic sign-in (no code). False when it failed: the login is then marked
-        login_needed and gets no more browser work this run."""
+        """One automatic sign-in (no code), under the per-login lock and with the status
+        'signing_in' meanwhile. False when it did not succeed: failed (the login is marked
+        login_needed) or another sign-in is running (the session is left alone); either way
+        the login gets no more browser work this run."""
+        cred = lg.cred
+        try:
+            with logins.login_lock(self._bind(), cred.id):
+                was = lg.version[0]
+                if self._cas(lg, {"status": "signing_in"}) is None:
+                    lg.skip = True  # changed since we read it: leave it to whoever did
+                    return False
+                try:
+                    return self._signing_in(lg, state, was)
+                finally:
+                    if lg.version[0] == "signing_in":  # nothing recorded an outcome
+                        self._cas(lg, {"status": was})
+        except logins.LoginBusy:
+            lg.skip = True
+            return False
+
+    def _signing_in(self, lg: _Login, state: FetchState, was: str) -> bool:
         cred = lg.cred
         state.throttle(urlsplit(cred.login_url or "").netloc)
         try:
@@ -298,7 +335,7 @@ class WatchConnector:
             self._save_ok(lg)
             return True
         lg.dead = creds.redact(error, cred)[:500]
-        self._mark_login_needed(lg, lg.dead)
+        self._mark_login_needed(lg, lg.dead, was=was)
         return False
 
     def _login_target(self, client: httpx.Client, state: FetchState, t: dict,
@@ -315,15 +352,18 @@ class WatchConnector:
         refused = preflight(client, state, url)
         if refused is not None:
             return _process(t, refused, cred)
-        res, new_state, expired = logins.browser_fetch(url, cred, lg.state)
+        res, new_state, expired = logins.browser_fetch(url, cred, lg.state, t["kind"])
         if expired and not lg.tried:
             lg.tried = True
+            if not lg.auto_ok:  # already needs the user: no automatic retry (R-a)
+                lg.skip = True
+                return _entry(t, "login_needed", error=logins.LOGIN_NEEDED)
             if not self._sign_in(lg, state):
                 return _entry(t, "login_needed", error=logins.LOGIN_NEEDED)
             if lg.skip:  # the session was taken over while signing in
                 return _entry(t, "login_needed", error=logins.LOGIN_NEEDED)
             state.throttle(urlsplit(url).netloc)
-            res, new_state, expired = logins.browser_fetch(url, cred, lg.state)
+            res, new_state, expired = logins.browser_fetch(url, cred, lg.state, t["kind"])
         if expired or res.status == "login_needed":
             # Never the login page as content. After a fresh sign-in this is the page's own
             # problem, so only this KPI is marked.

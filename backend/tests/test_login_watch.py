@@ -119,12 +119,15 @@ class FakeSite:
         self.content = {}  # url -> text
         self.echo_password = False
         self.on_fetch = None
+        self.on_sign_in = None
+        self.kinds: list[str] = []
         self._n = 0
         monkeypatch.setattr(logins, "browser_fetch", self.browser_fetch)
         monkeypatch.setattr(logins, "sign_in", self.sign_in)
 
-    def browser_fetch(self, url, cred, state):
+    def browser_fetch(self, url, cred, state, kind="page"):
         self.fetches.append((url, state))
+        self.kinds.append(kind)
         if self.on_fetch:
             self.on_fetch(url)
         sids = {c["value"] for c in (state or {}).get("cookies", [])}
@@ -141,6 +144,8 @@ class FakeSite:
     def sign_in(self, cred, code_provider=None, timeout_s=600):
         assert code_provider is None
         self.sign_ins += 1
+        if self.on_sign_in:
+            self.on_sign_in()
         if self.fail:
             raise logins.LoginFailed(creds.redact(f"login failed: bad {cred.secret}", cred))
         if self.code_mode:
@@ -263,6 +268,23 @@ def test_import_confirm_rechecks_login_host(client, db_session):
     assert out["created_targets"] == 0 and out["skipped"] == 1
 
 
+def test_switching_used_key_into_login_409(client, db_session, wenv):
+    src, _ = wenv
+    login = {"kind": "login", "login_url": LOGIN_URL, "username": USER}
+    h = mk_header_key(db_session)
+    add_target(db_session, src, h, use_browser=False)
+    r = client.patch(f"/api/credentials/{h.id}", json=login)
+    assert r.status_code == 409 and r.json() == {"detail": "this key is used by KPIs"}
+    h2 = mk_header_key(db_session, name="Hdr2")
+    s2 = Source(slug="static-x", name="Static", area="a", access="api", credential_id=h2.id)
+    db_session.add(s2)
+    db_session.flush()
+    r = client.patch(f"/api/credentials/{h2.id}", json=login)
+    assert r.status_code == 409 and r.json() == {"detail": "this key is used by KPIs"}
+    h3 = mk_header_key(db_session, name="Hdr3")
+    assert client.patch(f"/api/credentials/{h3.id}", json=login).status_code == 200
+
+
 def test_switching_used_login_to_other_kind_409(client, db_session, wenv):
     src, _ = wenv
     c = mk_login(db_session)
@@ -383,7 +405,7 @@ def test_login_needed_alert_once(wenv, db_session, monkeypatch):
     assert sum(m.count("needs you to sign in") for m in rec.messages) == 1
     assert rec.messages[0].endswith(ALERT)
     assert "check failed" in rec.messages[0]
-    assert site.sign_ins == 2  # one try per run
+    assert site.sign_ins == 1  # tried once; never again after a code was asked for
     db_session.expire_all()
     assert all(t.last_status == "login_needed" for t in db_session.scalars(select(WatchTarget)))
 
@@ -402,7 +424,13 @@ def test_alert_again_after_recovery_then_expiry(wenv, db_session, monkeypatch):
     rec = Rec()
     run(sf, rec)
     assert sum(m.count("needs you to sign in") for m in rec.messages) == 1
-    site.code_mode = False  # the site lets the password through again
+    # The user signs in from the dashboard (Task 4): a fresh session, status ok.
+    with sf() as s:
+        s.execute(update(LoginSession).where(LoginSession.credential_id == c.id).values(
+            status="ok", last_error=None,
+            state_enc=creds.encrypt(json.dumps(sid_state("fresh")))))
+        s.commit()
+    site.valid.add("fresh")
     assert run(sf, rec).status in ("ok", "no_change", "baseline")
     assert session_row(db_session, c.id).status == "ok"
     run(sf, rec)  # still fine: no alert
@@ -411,6 +439,134 @@ def test_alert_again_after_recovery_then_expiry(wenv, db_session, monkeypatch):
     site.code_mode = True
     run(sf, rec)
     assert sum(m.count("needs you to sign in") for m in rec.messages) == 2
+
+
+# --- R-a: when an automatic sign-in may be tried ----------------------------------------
+
+@respx.mock
+def test_no_auto_sign_in_after_code_or_failure(wenv, db_session, monkeypatch):
+    src, sf = wenv
+    site = FakeSite(monkeypatch, valid=())
+    c = mk_login(db_session, status="login_needed", state=sid_state("old"))
+    with sf() as s:
+        s.execute(update(LoginSession).where(LoginSession.credential_id == c.id)
+                  .values(last_error="login failed: still on the login page"))
+        s.commit()
+    add_target(db_session, src, c, "https://portal.example/a", "A")
+    add_target(db_session, src, c, "https://portal.example/b", "B")
+    robots()
+    before = session_row(db_session, c.id)
+    before = (before.status, bytes(before.state_enc), before.last_error, before.updated_at)
+    rec = Rec()
+    for _ in range(2):
+        r = run(sf, rec)
+        assert r.status == "failed"
+    assert site.sign_ins == 0
+    assert len(site.fetches) == 2  # one expired fetch per run, then nothing more
+    after = session_row(db_session, c.id)
+    assert (after.status, bytes(after.state_enc), after.last_error, after.updated_at) == before
+    assert not any("needs you to sign in" in m for m in rec.messages)
+
+
+@respx.mock
+def test_reset_login_gets_exactly_one_attempt(wenv, db_session, monkeypatch, client):
+    src, sf = wenv
+    site = FakeSite(monkeypatch, valid=())
+    site.fail = True
+    c = mk_login(db_session)  # fresh: login_needed, no error
+    add_target(db_session, src, c)
+    robots()
+    run(sf)
+    run(sf)
+    assert site.sign_ins == 1
+    assert session_row(db_session, c.id).last_error.startswith("login failed")
+    # Editing the password resets the session: one more automatic try is allowed.
+    r = client.patch(f"/api/credentials/{c.id}", json={"secret": "an0ther-passw0rd"})
+    assert r.status_code == 200
+    site.fail = False
+    assert run(sf).status in ("baseline", "ok", "no_change")
+    assert site.sign_ins == 2
+    assert session_row(db_session, c.id).status == "ok"
+
+
+@respx.mock
+def test_ok_login_expired_signs_in_and_status_is_signing_in_meanwhile(
+        wenv, db_session, monkeypatch):
+    src, sf = wenv
+    site = FakeSite(monkeypatch, valid=())
+    c = mk_login(db_session, status="ok", state=sid_state("old"))
+    add_target(db_session, src, c)
+    seen = []
+
+    def peek():
+        with sf() as s:
+            seen.append(s.get(LoginSession, c.id).status)
+
+    site.on_sign_in = peek
+    robots()
+    run(sf)
+    assert seen == ["signing_in"] and session_row(db_session, c.id).status == "ok"
+    # A crash inside the attempt restores the earlier status (here: after expiry again).
+    site.valid.clear()
+
+    def boom():
+        raise RuntimeError("browser died")
+
+    site.on_sign_in = boom
+    run(sf)
+    row = session_row(db_session, c.id)
+    assert row.status == "login_needed"
+    assert row.last_error == "login failed: RuntimeError"
+
+
+@respx.mock
+def test_sign_in_lock_busy_skips_without_touching_session(wenv, db_session, monkeypatch,
+                                                          db_engine):
+    from sqlalchemy import text
+
+    src, sf = wenv
+    site = FakeSite(monkeypatch, valid=())
+    c = mk_login(db_session, status="ok", state=sid_state("old"))
+    add_target(db_session, src, c, "https://portal.example/a", "A")
+    add_target(db_session, src, c, "https://portal.example/b", "B")
+    robots()
+    before = session_row(db_session, c.id)
+    before = (before.status, bytes(before.state_enc), before.updated_at)
+    other = db_engine.connect()
+    params = {"ns": logins.LOGIN_LOCK_NAMESPACE, "cid": c.id}
+    other.execute(text("SELECT pg_advisory_lock(:ns, :cid)"), params)
+    try:
+        r = run(sf)
+    finally:
+        other.execute(text("SELECT pg_advisory_unlock(:ns, :cid)"), params)
+        other.close()
+    assert site.sign_ins == 0 and len(site.fetches) == 1
+    assert r.status == "failed" and "login_needed: login needed" in r.error
+    after = session_row(db_session, c.id)
+    assert (after.status, bytes(after.state_enc), after.updated_at) == before
+
+
+def test_login_lock_is_exclusive(db_engine):
+    with logins.login_lock(db_engine, 987654):
+        with pytest.raises(logins.LoginBusy), logins.login_lock(db_engine, 987654):
+            pass
+        with logins.login_lock(db_engine, 987655):  # another login is independent
+            pass
+    with logins.login_lock(db_engine, 987654):  # released
+        pass
+
+
+@respx.mock
+def test_kind_passed_to_browser_fetch(wenv, db_session, monkeypatch):
+    src, sf = wenv
+    site = FakeSite(monkeypatch)
+    c = mk_login(db_session, status="ok", state=sid_state("s1"))
+    t = add_target(db_session, src, c, "https://portal.example/a", "A")
+    t.kind = "api"
+    db_session.flush()
+    robots()
+    run(sf)
+    assert site.kinds == ["api"]
 
 
 @respx.mock
@@ -611,3 +767,31 @@ def test_e2e_relogin_then_login_page_never_becomes_content(wenv, db_session, sit
     assert len(db_session.scalars(select(WatchSnapshot)).all()) == 2
     assert session_row(db_session, c.id).status == "login_needed"
     assert sum(m.count("needs you to sign in") for m in rec.messages) == 1
+
+
+@browser
+def test_e2e_json_behind_login(wenv, db_session, site):
+    from tests.login_site import PROTECTED
+
+    src, sf = wenv
+    c = mk_login(db_session, login_url=site.url("/login"))
+    t1 = add_target(db_session, src, c, site.url("/api/data"), "Api")  # 401 when signed out
+    t1.kind = "api"
+    t2 = add_target(db_session, src, c, site.url("/api/json"), "Auto")  # 302 when signed out
+    t2.kind = "auto"
+    db_session.flush()
+    r = run(sf)
+    assert r.status == "baseline", r.error
+    raw = Path(r.raw_path).read_text(encoding="utf-8")
+    assert PASSWORD not in raw
+    targets = {x["kpi_name"]: x for x in json.loads(raw)["targets"]}
+    for name in ("Api", "Auto"):
+        assert targets[name]["kind"] == "api"
+        assert targets[name]["json"]["value"] == 42
+        assert targets[name]["json"]["label"] == PROTECTED
+    db_session.expire_all()
+    assert set(db_session.scalars(select(DataPoint.indicator))) == {"Api", "Auto"}
+    # Signed out again: the API's 401 counts as an expired session -> one sign-in, data back.
+    site.expire_all()
+    assert run(sf).status == "no_change"
+    assert session_row(db_session, c.id).status == "ok"

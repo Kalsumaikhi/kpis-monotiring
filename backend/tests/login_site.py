@@ -17,6 +17,8 @@ the browser is told to trust exactly that certificate's key (see `spki`). Pages:
 - GET /login-redirect   302 to /login on the second host name (127.0.0.1)
 - GET /login-offsite    a form whose action posts to the second host name
 - GET/POST /login-promo a form with an extra "promo code" box; bad logins re-render it here
+- GET /api/data         JSON behind the session cookie, else 401 (JSON error)
+- GET /api/json         JSON behind the session cookie, else 302 /login
 - GET /welcome          post-code landing page (when `pin_after_code`) with an unrelated
                         "pin" search box
 `expire_all()` drops every session. `cookies_seen` records (host, Cookie header) per GET;
@@ -30,6 +32,7 @@ import datetime
 import hashlib
 import http.server
 import ipaddress
+import json
 import secrets
 import ssl
 import tempfile
@@ -216,6 +219,19 @@ class LoginSite:
                 elif path == "/pixel":
                     self._send(200, "", {"Set-Cookie":
                                          "tracker=t1; Path=/; Secure; SameSite=None"})
+                elif path in ("/api/data", "/api/json"):
+                    if self._authed():
+                        data = json.dumps({"value": 42, "label": PROTECTED,
+                                           "who": site.password}).encode()
+                        self.send_response(200)
+                        self.send_header("Content-Type", "application/json")
+                        self.send_header("Content-Length", str(len(data)))
+                        self.end_headers()
+                        self.wfile.write(data)
+                    elif path == "/api/data":
+                        self._send(401, '{"error": "unauthorized"}')
+                    else:
+                        self._send(302, "", {"Location": "/login"})
                 elif path in ("/data", "/inline", "/echo"):
                     if self._authed():
                         extra = f"<p>you are {site.password}</p>" if path == "/echo" else ""

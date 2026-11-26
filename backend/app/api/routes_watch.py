@@ -361,7 +361,7 @@ def test_link(body: TestIn, session: Session = Depends(get_session)):
             if cred is not None and cred.kind == "login":
                 res = preflight(client, FetchState(), body.url)
                 if res is None:
-                    res, _, _ = logins.browser_fetch(body.url, cred, state)
+                    res, _, _ = logins.browser_fetch(body.url, cred, state, body.kind)
             else:
                 res = fetch_target(client, body.url, use_browser, credential=cred)
             e = _process(entry, res, cred)

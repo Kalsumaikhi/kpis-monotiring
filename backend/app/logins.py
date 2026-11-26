@@ -14,10 +14,12 @@ import ipaddress
 import json
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import replace
 from urllib.parse import urlsplit
 
+from sqlalchemy import Engine, text
 from sqlalchemy.orm import Session
 
 from app import credentials as creds
@@ -125,6 +127,40 @@ class LoginNeedsCode(Exception):
 
 class LoginFailed(Exception):
     """Sign-in failed. The message is a fixed string (already redacted)."""
+
+
+class LoginBusy(Exception):
+    """Another sign-in of this login is running (login_lock is held elsewhere)."""
+
+
+# First key of pg_try_advisory_lock(int, int) for sign-ins; the second is the credential id.
+# Distinct from the per-source run lock (pipeline.LOCK_NAMESPACE = 7421).
+LOGIN_LOCK_NAMESPACE = 7422
+
+
+@contextmanager
+def login_lock(bind, credential_id: int) -> Iterator[None]:
+    """Hold the per-login sign-in lock for the block, non-blocking: raises LoginBusy when
+    another sign-in (automatic or from the dashboard) holds it. Session-level advisory lock
+    on a dedicated autocommit connection when `bind` is an Engine (a Connection, as in tests,
+    is reused), so it lasts however long the browser takes."""
+    own = isinstance(bind, Engine)
+    conn = bind.connect().execution_options(isolation_level="AUTOCOMMIT") if own else bind
+    params = {"ns": LOGIN_LOCK_NAMESPACE, "cid": credential_id}
+    try:
+        got = conn.execute(text("SELECT pg_try_advisory_lock(:ns, :cid)"), params).scalar()
+        if not got:
+            raise LoginBusy("a sign-in is already in progress")
+        try:
+            yield
+        finally:
+            try:
+                conn.execute(text("SELECT pg_advisory_unlock(:ns, :cid)"), params)
+            except Exception:  # noqa: BLE001 - a dead connection has dropped the lock anyway
+                log.exception("advisory unlock failed for login %s", credential_id)
+    finally:
+        if own:
+            conn.close()
 
 
 def _redact(text: str, cred: creds.Credential, code: str | None = None) -> str:
@@ -287,9 +323,14 @@ def _code_box(page, sel: dict):
 
 # --- public API -----------------------------------------------------------------------------
 
-def browser_fetch(url: str, cred: creds.Credential,
-                  state: dict | None) -> tuple[FetchResult, dict | None, bool]:
+def browser_fetch(url: str, cred: creds.Credential, state: dict | None,
+                  kind: str = "page") -> tuple[FetchResult, dict | None, bool]:
     """Render `url` with the login's session. Returns (result, new state, expired).
+
+    `kind` is the KPI's kind. 'page' returns the rendered HTML. 'api' and 'auto' return the
+    raw body of the main response (same browser, cookies, proxy and certificate checks)
+    when it is JSON ('api' always returns the raw body); for 'api' a 401/403 counts as an
+    expired session, since APIs answer that rather than showing the login page.
 
     The session is applied only when `url` is https on a host allowed for the login;
     otherwise the page is fetched without it and `state` is handed back unchanged. A page
@@ -320,19 +361,24 @@ def browser_fetch(url: str, cred: creds.Credential,
             page.route("**/*", _guard)
             resp = page.goto(url, timeout=int(TIMEOUT * 1000), wait_until="load")
             _settle(page, min(10.0, deadline - time.monotonic()))
-            if _on_login_page(page, cred):
+            if _on_login_page(page, cred) or (
+                    kind == "api" and resp is not None and resp.status in (401, 403)):
                 return FetchResult("login_needed", error=LOGIN_NEEDED), new_state(context), True
             if resp is not None and resp.status >= 400:
                 return FetchResult("error", error=f"HTTP {resp.status}"), state, False
-            html = page.content()
+            ctype = "text/html; charset=utf-8"
+            raw_ctype = (resp.headers.get("content-type", "") if resp is not None else "")
+            if resp is not None and (kind == "api" or (kind == "auto"
+                                                       and "json" in raw_ctype.lower())):
+                body, ctype = resp.body(), raw_ctype
+            else:
+                body = page.content().encode("utf-8")
             out_state = new_state(context)
     except Exception as e:  # noqa: BLE001 - playwright raises its own error types
         return FetchResult("error", error=f"browser error: {type(e).__name__}"), state, False
-    body = html.encode("utf-8")
     if len(body) > MAX_BYTES:
-        return FetchResult("error", "text/html", error="too large"), state, False
-    return (FetchResult("ok", "text/html; charset=utf-8", creds.redact_bytes(body, cred)),
-            out_state, False)
+        return FetchResult("error", ctype, error="too large"), state, False
+    return FetchResult("ok", ctype, creds.redact_bytes(body, cred)), out_state, False
 
 
 def sign_in(cred: creds.Credential, code_provider: Callable[[], str | None] | None,
