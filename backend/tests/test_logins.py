@@ -388,3 +388,51 @@ def test_code_provider_error(site):
         logins.sign_in(cred_for(site), broken, timeout_s=30)
     assert str(e.value) == "could not read the code"
     assert e.value.__cause__ is None and e.value.__suppress_context__
+
+
+@browser
+def test_wrong_password_on_redirected_login_page_fails_fast(site):
+    """The sign-in form lives behind a redirect (login_url is not the form's URL): a rejected
+    password is still detected by comparing with the page just before submit."""
+    cred = cred_for(site, path="/promo-redirect")
+    cred.secret = "Wrong-password-99"
+    with pytest.raises(logins.LoginFailed) as e:  # not LoginNeedsCode (the promo box)
+        logins.sign_in(cred, None)
+    assert str(e.value) == "login failed: still on the login page"
+
+
+@browser
+def test_navigation_after_check_types_nothing_into_the_new_page(site, monkeypatch):
+    """The page navigates after the where-check (TOCTOU): the boxes found before are stale,
+    so nothing is typed into, or submitted from, the new page."""
+    real = logins._check_where
+    cred = cred_for(site, selectors={"username": "input[type=email]",
+                                     "password": "input[type=password]",
+                                     "submit": "button[type=submit]"})
+
+    def check_then_navigate(page, c, box, button=None):
+        real(page, c, box, button)
+        if "/verify" not in page.url:
+            page.goto(site.url("/login-offsite"))  # its form posts to 127.0.0.1
+
+    monkeypatch.setattr(logins, "_check_where", check_then_navigate)
+    with pytest.raises(logins.LoginFailed):
+        logins.sign_in(cred, None)
+    assert _password_posted(site) == []
+
+
+@browser
+def test_unnamed_code_box_then_other_unnamed_box_is_success(site):
+    site.code_mode = True
+    site.unnamed_code = True
+    state = logins.sign_in(cred_for(site), code_from(site), timeout_s=30)
+    assert any(c["name"] == "sid" for c in state["cookies"])
+
+
+@browser
+def test_unnamed_code_box_wrong_code_fails(site):
+    site.code_mode = True
+    site.unnamed_code = True
+    with pytest.raises(logins.LoginFailed) as e:
+        logins.sign_in(cred_for(site), lambda: "000000", timeout_s=30)
+    assert str(e.value) == "code was not accepted"

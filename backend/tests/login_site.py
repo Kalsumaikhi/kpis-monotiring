@@ -19,6 +19,9 @@ the browser is told to trust exactly that certificate's key (see `spki`). Pages:
 - GET/POST /login-promo a form with an extra "promo code" box; bad logins re-render it here
 - GET /api/data         JSON behind the session cookie, else 401 (JSON error)
 - GET /api/json         JSON behind the session cookie, else 302 /login
+- GET /promo-redirect   302 to /login-promo on the same host (the login page is not login_url)
+- GET/POST /verify-unnamed  a code step whose box has no name or id (when `unnamed_code`);
+                        after the code it lands back on the same path, with an unnamed search box
 - GET /welcome          post-code landing page (when `pin_after_code`) with an unrelated
                         "pin" search box
 `expire_all()` drops every session. `cookies_seen` records (host, Cookie header) per GET;
@@ -123,6 +126,18 @@ VERIFY_FORM = """<html><body>
 </body></html>"""
 
 
+UNNAMED_VERIFY_FORM = """<html><body>
+<p>We emailed you a code.</p>
+<form method="post" action="/verify-unnamed"
+      onsubmit="this.otp.value = this.querySelector('[autocomplete]').value">
+  <input type="hidden" name="otp">
+  <input type="text" inputmode="numeric" maxlength="6" autocomplete="one-time-code">
+  <button type="submit">Verify</button>
+</form>
+{error}
+</body></html>"""
+
+
 class LoginSite:
     def __init__(self, username: str, password: str, code_file: Path | None = None) -> None:
         self.username = username
@@ -130,6 +145,7 @@ class LoginSite:
         self.code_file = code_file
         self.code_mode = False
         self.pin_after_code = False
+        self.unnamed_code = False
         self.posts: list[tuple[str, str, str]] = []
         self.sessions: set[str] = set()
         self.pending: dict[str, str] = {}  # pending token -> code
@@ -212,6 +228,15 @@ class LoginSite:
                         action=site.url("/login", host="127.0.0.1")))
                 elif path == "/login-promo":
                     self._send(200, PROMO_FORM.format(error=""))
+                elif path == "/promo-redirect":
+                    self._send(302, "", {"Location": "/login-promo"})
+                elif path == "/verify-unnamed":
+                    if self._authed():
+                        self._send(200, f"<html><body><main>{PROTECTED}</main>"
+                                        '<input type="search" placeholder="Search">'
+                                        "</body></html>")
+                    else:
+                        self._send(200, UNNAMED_VERIFY_FORM.format(error=""))
                 elif path == "/welcome" and self._authed():
                     self._send(200, f"<html><body><main>{PROTECTED}</main>"
                                     '<input type="text" name="pin_search" placeholder="Find a PIN">'
@@ -271,19 +296,24 @@ class LoginSite:
                         site.pending[token] = code
                         if site.code_file is not None:
                             site.code_file.write_text(code)
-                        self._send(303, "", {"Location": "/verify",
+                        verify = "/verify-unnamed" if site.unnamed_code else "/verify"
+                        self._send(303, "", {"Location": verify,
                                              "Set-Cookie": f"pending={token}; Path=/; Secure"})
                         return
                     self._send(303, "", {"Location": "/data", "Set-Cookie": self._sign_in_cookie()})
-                elif self.path == "/verify":
+                elif self.path in ("/verify", "/verify-unnamed"):
                     token = self._cookies().get("pending", "")
                     if token in site.pending and form.get("otp") == site.pending[token]:
                         del site.pending[token]
                         landing = "/welcome" if site.pin_after_code else "/data"
+                        if self.path == "/verify-unnamed":
+                            landing = "/verify-unnamed"
                         self._send(303, "", {"Location": landing,
                                              "Set-Cookie": self._sign_in_cookie()})
                     else:
-                        self._send(200, VERIFY_FORM.format(
+                        form_html = (UNNAMED_VERIFY_FORM if self.path == "/verify-unnamed"
+                                     else VERIFY_FORM)
+                        self._send(200, form_html.format(
                             error=f"<p>code {form.get('otp')} is wrong</p>"))
                 else:
                     self._send(404, "not found")

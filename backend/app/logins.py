@@ -110,11 +110,15 @@ _FORM_TARGETS_JS = """(el, btn) => { const out = [el.form ? el.form.action : loc
   if (btn && btn.formAction) out.push(btn.formAction);
   return out; }"""
 
-_BOX_SIG_JS = "el => [el.getAttribute('name') || '', el.id || '']"
+# A box's signature: name, id, type, autocomplete and placeholder (so an unnamed code box is
+# not mistaken for an unrelated unnamed box on the next page).
+_SIG_OF = ("el => [el.getAttribute('name') || '', el.id || '', (el.type || '').toLowerCase(),"
+           " el.getAttribute('autocomplete') || '', el.getAttribute('placeholder') || '']")
+_BOX_SIG_JS = _SIG_OF
 
-_SAME_BOX_VISIBLE_JS = f"""sig => {{ const vis = {_VISIBLE_JS};
+_SAME_BOX_VISIBLE_JS = f"""sig => {{ const vis = {_VISIBLE_JS}; const of = {_SIG_OF};
   return [...document.querySelectorAll('input')].some(el => vis(el)
-    && (el.getAttribute('name') || '') === sig[0] && (el.id || '') === sig[1]); }}"""
+    && JSON.stringify(of(el)) === JSON.stringify(sig)); }}"""
 
 # The code box's form's submit button, marked; false when there is none.
 _MARK_CODE_SUBMIT_JS = f"""el => {{ const b = el.form
@@ -309,8 +313,7 @@ def _check_where(page, cred: creds.Credential, box, button=None) -> None:
     """Before typing a secret: the page and where its form submits must be https on a host
     allowed for this login; otherwise nothing is typed."""
     hosts = creds.allowed_hosts(cred)
-    targets = [page.url] + box.evaluate(_FORM_TARGETS_JS,
-                                        button.element_handle() if button is not None else None)
+    targets = [page.url] + box.evaluate(_FORM_TARGETS_JS, button)  # element handles
     if not all(_on_allowed(u, hosts) for u in targets):
         raise _fail(MOVED, cred)
 
@@ -442,18 +445,23 @@ def sign_in(cred: creds.Credential, code_provider: Callable[[], str | None] | No
             else:
                 submit = page.locator(f"[{MARK}=submit]").first if found["submit"] else None
 
+            # Element handles, taken before the where-check: if the page navigates after it,
+            # they go stale (and fail) instead of resolving to boxes on another page.
+            pw, user = pw.element_handle(), user.element_handle()
+            submit = submit.element_handle() if submit is not None else None
             _check_where(page, cred, pw, submit)
             page.set_default_timeout(left_ms())
+            form_page = _host_path(page.url)
             user.fill(cred.username or "")
             pw.fill(cred.secret)
             _submit_and_wait(page, submit.click if submit is not None
                              else (lambda: pw.press("Enter")))
             left_ms()
 
-            # A rejected password: still on the login page with a password box. Checked
-            # before code detection so an unrelated "promo code" box is not taken for one.
-            if (_host_path(page.url) == _host_path(url)
-                    and page.evaluate(_HAS_VISIBLE_PASSWORD_JS)):
+            # A rejected password: still on the page the form was on, with a password box.
+            # Checked before code detection so an unrelated "promo code" box is not taken
+            # for one.
+            if _host_path(page.url) == form_page and page.evaluate(_HAS_VISIBLE_PASSWORD_JS):
                 raise _fail(STILL_ON_LOGIN, cred)
 
             box = _code_box(page, sel)
@@ -476,8 +484,9 @@ def sign_in(cred: creds.Credential, code_provider: Callable[[], str | None] | No
                 budget["deadline"] += time.monotonic() - waited_from  # the wait is not counted
                 code_page = _host_path(page.url)
                 sig = box.evaluate(_BOX_SIG_JS)
-                code_submit = (page.locator(f"[{MARK}=code-submit]").first
+                code_submit = (page.locator(f"[{MARK}=code-submit]").first.element_handle()
                                if box.evaluate(_MARK_CODE_SUBMIT_JS) else None)
+                box = box.element_handle()  # stale after a navigation (see above)
                 _check_where(page, cred, box, code_submit)
                 page.set_default_timeout(left_ms())
                 box.fill(code)
