@@ -32,6 +32,8 @@ def run_migrations_online() -> None:
     with engine.connect() as connection:
         context.configure(connection=connection, target_metadata=target_metadata)
         with context.begin_transaction():
+            # Don't stall every query on a table behind an idle-in-transaction worker.
+            context.execute("SET LOCAL lock_timeout = '10s'")
             context.run_migrations()
     engine.dispose()
 

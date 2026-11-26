@@ -425,7 +425,7 @@ def _skipped_deletions_before(session: Session, source_id: int, run_id: int) -> 
     if since is not None:
         q = q.where(Run.started_at >= since)
     error = session.scalar(q.order_by(Run.id.desc()).limit(1))
-    return SKIPPED_DELETIONS in (error or "")
+    return (error or "").startswith(SKIPPED_DELETIONS)
 
 
 def run_source(

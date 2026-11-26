@@ -42,8 +42,10 @@ log = logging.getLogger("alembic.runtime.migration")
 
 
 def _say(line: str) -> None:
-    log.warning(line)
-    print(line, file=sys.stderr)  # also when logging is not configured
+    if log.hasHandlers() and any(not isinstance(h, logging.NullHandler) for h in logging.getLogger().handlers + log.handlers):
+        log.warning(line)
+    else:
+        print(line, file=sys.stderr)  # logging not configured: still show it
 
 
 def _key_hash(dataset: str, indicator: str, country: str, period: str, dims) -> str:

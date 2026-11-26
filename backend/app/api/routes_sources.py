@@ -203,7 +203,7 @@ def patch_source(slug: str, body: SourcePatch, session: Session = Depends(get_se
         # hold for the whole run: no run can be fetching with the old key and then clear
         # the flag, and no approval can apply old-key data. 409 while a run holds it.
         sid = source.id
-        with source_lock(session, sid):
+        with source_lock(session, sid, "a check is running for this source; try again when it finishes"):
             session.refresh(source)  # state may have changed while waiting
             _apply_source_patch(source, body)
             if body.credential_id != source.credential_id:

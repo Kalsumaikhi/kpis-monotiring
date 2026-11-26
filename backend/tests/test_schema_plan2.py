@@ -216,7 +216,7 @@ def test_migration_0010_renames_are_shown_by_the_alembic_cli(db_engine):
         err = alembic("upgrade", "head")
         assert "Running upgrade 0009 -> 0010" in err  # alembic's own INFO logging is configured
         assert "[alembic.runtime.migration]" in err and "'PRICE (2)'" in err
-        assert err.count("'PRICE (2)'") >= 2  # the log line and the plain stderr line
+        assert err.count("'PRICE (2)'") == 1  # shown once: through alembic's logging, not printed twice
     finally:
         e.dispose()
         with db_engine.connect().execution_options(isolation_level="AUTOCOMMIT") as c:
