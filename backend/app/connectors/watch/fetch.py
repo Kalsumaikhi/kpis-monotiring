@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import base64
 import ipaddress
 import logging
 import os
 import socket
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from urllib import robotparser
 from urllib.parse import urljoin, urlsplit
@@ -25,7 +28,7 @@ MIN_INTERVAL = 1.0  # seconds between requests to the same host
 
 @dataclass
 class FetchResult:
-    status: str  # 'ok' | 'blocked' | 'error' | 'key_rejected'
+    status: str  # 'ok' | 'blocked' | 'error' | 'key_rejected' | 'login_needed'
     content_type: str = ""
     body: bytes = b""
     error: str | None = None
@@ -161,6 +164,54 @@ BROWSER_ARGS = [
 ]
 
 
+# TEST ONLY: base64 SHA-256 of one certificate's public key that Chromium should accept
+# although no CA signed it (the login-engine tests' self-signed site). Never set it in
+# production; it trusts only that key, not "any certificate".
+TEST_TRUSTED_SPKI_ENV = "KPI_TEST_TRUSTED_SPKI"
+
+
+def _launch_options(proxy_url: str) -> dict:
+    args = list(BROWSER_ARGS)
+    spki = os.environ.get(TEST_TRUSTED_SPKI_ENV, "").strip()
+    if spki:
+        try:
+            ok = len(base64.b64decode(spki, validate=True)) == 32
+        except ValueError:
+            ok = False
+        if ok:
+            args.append(f"--ignore-certificate-errors-spki-list={spki}")
+    launch: dict = {"proxy": {"server": proxy_url}, "args": args}
+    exe = os.environ.get("KPI_CHROMIUM_PATH")
+    if exe:
+        launch["executable_path"] = exe
+    return launch
+
+
+@contextmanager
+def browser_context(storage_state: dict | None = None) -> Iterator:
+    """A fresh headless Chromium context whose every request goes through a new PolicyProxy
+    (destination policy per request, incl. CONNECT; WebRTC UDP disabled). `storage_state`
+    seeds cookies/localStorage. Raises ImportError when Playwright is not installed. The
+    browser and the proxy are closed on exit."""
+    from playwright.sync_api import sync_playwright
+
+    from app.connectors.watch.proxy import PolicyProxy
+
+    proxy = PolicyProxy()
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(**_launch_options(proxy.url))
+            try:
+                opts: dict = {"user_agent": USER_AGENT}
+                if storage_state is not None:
+                    opts["storage_state"] = storage_state
+                yield browser.new_context(**opts)
+            finally:
+                browser.close()
+    finally:
+        proxy.close()
+
+
 def _fetch_browser(url: str, nav_blocked=None) -> FetchResult:
     """Render `url` in headless Chromium.
 
@@ -173,10 +224,8 @@ def _fetch_browser(url: str, nav_blocked=None) -> FetchResult:
     `nav_blocked(url)` vets client-side navigations (meta refresh / script) the same way."""
     try:
         from playwright.sync_api import Error as PlaywrightError
-        from playwright.sync_api import sync_playwright
     except ImportError:
         return FetchResult("error", error="browser support not installed")
-    from app.connectors.watch.proxy import PolicyProxy
 
     redirect: list[str] = []
 
@@ -204,30 +253,19 @@ def _fetch_browser(url: str, nav_blocked=None) -> FetchResult:
             return
         route.continue_()
 
-    proxy = PolicyProxy()
     try:
-        with sync_playwright() as p:
-            exe = os.environ.get("KPI_CHROMIUM_PATH")
-            launch = {"proxy": {"server": proxy.url}, "args": BROWSER_ARGS}
-            if exe:
-                launch["executable_path"] = exe
-            browser = p.chromium.launch(**launch)
+        with browser_context() as context:
+            page = context.new_page()
+            page.route("**/*", guard)
             try:
-                page = browser.new_page(user_agent=USER_AGENT)
-                page.route("**/*", guard)
-                try:
-                    page.goto(url, timeout=int(TIMEOUT * 1000), wait_until="networkidle")
-                except PlaywrightError:
-                    if redirect:
-                        return FetchResult("redirect", error=redirect[0])
-                    raise
-                html = page.content()
-            finally:
-                browser.close()
+                page.goto(url, timeout=int(TIMEOUT * 1000), wait_until="networkidle")
+            except PlaywrightError:
+                if redirect:
+                    return FetchResult("redirect", error=redirect[0])
+                raise
+            html = page.content()
     except Exception as e:  # noqa: BLE001 - playwright raises its own error types
         return FetchResult("error", error=f"browser error: {type(e).__name__}")
-    finally:
-        proxy.close()
     body = html.encode("utf-8")
     if len(body) > MAX_BYTES:
         return FetchResult("error", "text/html", error="too large")
