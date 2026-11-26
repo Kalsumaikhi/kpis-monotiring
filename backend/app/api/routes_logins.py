@@ -86,10 +86,14 @@ def latest_attempt(cid: int, session: Session = Depends(get_session)):
         raise HTTPException(404, "no sign-in yet")
     expires = a.waiting_since + CODE_WINDOW if a.waiting_since else None
     remaining = None
-    if expires is not None and a.status == "waiting_code":
+    status, error = a.status, a.error
+    if expires is not None and status == "waiting_code":
         # Server clock: the dashboard counts down from this, never from its own clock.
-        remaining = max(0, int((expires - session.scalar(select(func.now()))).total_seconds()))
-    return {"attempt_id": a.id, "status": a.status, "error": a.error,
+        now = session.scalar(select(func.now()))
+        remaining = max(0, int((expires - now).total_seconds()))
+        if now >= expires:  # read-only: the worker or a late code writes the row itself
+            status, error = "expired", EXPIRED
+    return {"attempt_id": a.id, "status": status, "error": error,
             "waiting_since": iso(a.waiting_since), "expires_at": iso(expires),
             "remaining_seconds": remaining}
 

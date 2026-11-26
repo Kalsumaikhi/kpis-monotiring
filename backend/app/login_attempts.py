@@ -48,7 +48,9 @@ log = logging.getLogger(__name__)
 
 CODE_WINDOW = timedelta(minutes=10)
 STALE_AFTER = timedelta(minutes=15)
-LOCK_WAIT_S = 60.0
+# Longer than one automatic sign-in can hold the lock (or a cancelled attempt finishing its
+# current browser step), so "Sign in now" waits instead of failing with BUSY.
+LOCK_WAIT_S = logins.SIGN_IN_BUDGET_S + logins.SUBMIT_WAIT_S + 15.0
 LOCK_RETRY_S = 1.0
 MAX_THREADS = 2
 POLL_SECONDS = 2
@@ -388,29 +390,41 @@ class _Attempt:
 
         if self.cid is None:
             return
-        self._tx(decide)
+        st = self._tx(decide)
         self.code = None
+        if st in ACTIVE_ATTEMPT_STATUSES and self.was[0] == "ok":
+            # It was working: the stored session may still be fine. A run shows which, so
+            # the badge corrects itself (R9 declined).
+            try:
+                queue_runs_for_login(self.sf, self.cid)
+            except Exception as e:  # noqa: BLE001
+                log.error("could not queue runs after failed sign-in %s: %s", self.id,
+                          type(e).__name__)
 
 
 def sweep_stale_attempts(session_factory) -> int:
-    """Worker startup (Review Focus 4). Active attempts older than STALE_AFTER, or whose login
-    lock is free (no live sign-in), become failed with RESTARTED and the code wiped. Login
+    """Worker startup (Review Focus 4). Active attempts older than STALE_AFTER, or started
+    ones (not pending) whose login lock is free (no live sign-in), become failed with
+    RESTARTED and the code wiped. Login
     sessions stuck in signing_in / waiting_code with a free lock go back to login_needed
     (last_error kept). Returns how many attempts were swept."""
     with session_factory() as s:
         bind = s.get_bind()
         now = s.scalar(select(func.now()))
         rows = s.execute(
-            select(LoginAttempt.id, LoginAttempt.credential_id, LoginAttempt.created_at)
+            select(LoginAttempt.id, LoginAttempt.credential_id, LoginAttempt.created_at,
+                   LoginAttempt.status)
             .where(LoginAttempt.status.in_(ACTIVE_ATTEMPT_STATUSES))
             .order_by(LoginAttempt.id)).all()
         stuck = list(s.scalars(select(LoginSession.credential_id)
                                .where(LoginSession.status.in_(STUCK_LOGIN))))
         s.rollback()
     swept = 0
-    for aid, cid, created in rows:
+    for aid, cid, created, status in rows:
         with ExitStack() as stack:
             if created >= now - STALE_AFTER:
+                if status == "pending":  # never started: this worker will pick it up
+                    continue
                 try:
                     stack.enter_context(logins.login_lock(bind, cid))
                 except logins.LoginBusy:

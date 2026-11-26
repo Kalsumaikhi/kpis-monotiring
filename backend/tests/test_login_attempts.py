@@ -19,7 +19,7 @@ import pytest
 import respx
 from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
-from sqlalchemy import select, text, update
+from sqlalchemy import func, select, text, update
 from sqlalchemy.orm import sessionmaker
 
 from app import credentials as creds
@@ -494,6 +494,8 @@ def test_sweep_stale_attempts(db_session, session_factory, db_engine):
         LoginAttempt(credential_id=logins_[3].id, status="verifying",
                      created_at=now - timedelta(minutes=20)),  # lock held but too old
         LoginAttempt(credential_id=logins_[4].id, status="succeeded"),
+        LoginAttempt(credential_id=logins_[5].id, status="pending",
+                     created_at=now - timedelta(minutes=20)),  # never picked up: too old
     ]
     db_session.add_all(rows)
     s4 = db_session.get(LoginSession, logins_[4].id)
@@ -514,7 +516,8 @@ def test_sweep_stale_attempts(db_session, session_factory, db_engine):
     db_session.expire_all()
     got = [(r.status, r.error, r.code_enc) for r in rows]
     assert got[0] == ("failed", RESTARTED, None)
-    assert got[1] == ("failed", RESTARTED, None)
+    assert got[1] == ("pending", None, None)  # just started: the worker picks it up next
+    assert got[5] == ("failed", RESTARTED, None)
     assert got[2] == ("signing_in", None, None)
     assert got[3] == ("failed", RESTARTED, None)
     assert got[4] == ("succeeded", None, None)
@@ -757,3 +760,51 @@ def test_queue_runs_behind_a_running_run(db_session, session_factory):
     assert len(ids) == 1
     assert la.queue_runs_for_login(session_factory, c.id) == []  # one queued is enough
     assert [r.trigger for r in queued(db_session, src)] == ["manual"]
+
+
+
+def test_failed_attempt_on_an_ok_login_queues_runs(client, db_session, session_factory,
+                                                   monkeypatch):
+    """R9 declined: a failed "Sign in now" on a login that was ok marks it login_needed; a run
+    is queued so the next fetch shows whether the stored session still works."""
+    c = mk_login(db_session, status="ok")
+    src = mk_source(db_session, "custom-w")
+    add_target(db_session, src, c)
+    fake = FakeSignIn(monkeypatch)
+    fake.fail_with = "login failed: still on the login page"
+    aid = start(client, c.id)
+    work(session_factory)
+    assert attempt(db_session, aid).status == "failed"
+    assert ls(db_session, c.id).status == "login_needed"
+    assert [r.trigger for r in queued(db_session, src)] == ["manual"]
+
+
+def test_failed_attempt_on_a_login_needed_login_queues_nothing(client, db_session,
+                                                              session_factory, monkeypatch):
+    c = mk_login(db_session, status="login_needed")
+    src = mk_source(db_session, "custom-w")
+    add_target(db_session, src, c)
+    fake = FakeSignIn(monkeypatch)
+    fake.fail_with = "login failed: still on the login page"
+    start(client, c.id)
+    work(session_factory)
+    assert queued(db_session, src) == []
+
+
+def test_lock_wait_covers_an_automatic_sign_in():
+    """Sign in now right after a cancel waits for the browser's current step instead of
+    failing with BUSY."""
+    assert la.LOCK_WAIT_S >= logins.SIGN_IN_BUDGET_S + logins.SUBMIT_WAIT_S
+
+
+@pytest.mark.parametrize("left", [timedelta(seconds=-1), timedelta(0)])
+def test_get_attempt_past_window_reads_expired(client, db_session, left):
+    c = mk_login(db_session)
+    aid = start(client, c.id)
+    db_session.execute(update(LoginAttempt).where(LoginAttempt.id == aid).values(
+        status="waiting_code",
+        waiting_since=func.now() - timedelta(minutes=10) + left))
+    db_session.commit()
+    r = client.get(f"/api/logins/{c.id}/attempt").json()
+    assert r["status"] == "expired" and r["error"] == EXPIRED and r["remaining_seconds"] == 0
+    assert attempt(db_session, aid).status == "waiting_code"  # a read-only projection
