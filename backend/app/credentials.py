@@ -88,6 +88,19 @@ def allowed_hosts(cred: Credential) -> set[str]:
     return hosts
 
 
+LOGIN_HOST_MSG = 'this login is for {host}; add the KPI\'s site under "Also used on"'
+
+
+def login_host_error(cred, url: str) -> str | None:
+    """None when `url`'s host is allowed for the login `cred` (a Credential or a credentials
+    row), else the message to show."""
+    host = (urlsplit(url).hostname or "").lower()
+    if host and host in allowed_hosts(cred):
+        return None
+    login_host = urlsplit(cred.login_url).hostname if cred.login_url else ""
+    return LOGIN_HOST_MSG.format(host=(login_host or "").lower())
+
+
 def _basic_token(cred: Credential) -> str:
     return base64.b64encode(f"{cred.username or ''}:{cred.secret}".encode()).decode()
 

@@ -203,12 +203,18 @@ def _notify_extras(session: Session, run: Run) -> dict:
     return extras
 
 
-def _notify(session: Session, run: Run, notifier) -> None:
+def _notify(session: Session, run: Run, notifier, connector=None) -> None:
+    """Send the run's message. `connector` (run_source only) may add extras through an
+    optional notify_extras(session, run) hook, e.g. logins that now need a sign-in; they
+    are taken whatever the run's final status."""
+    hook = getattr(connector, "notify_extras", None)
     if notifier is None:
         return
     try:
         source = session.get(Source, run.source_id)
         extras = _notify_extras(session, run)
+        if hook is not None:
+            extras.update(hook(session, run))
         top = _top_indicators(session, run)
         if extras["page_kpis"]:
             top = [(i, n) for i, n in top if i not in extras["page_kpis"]]
@@ -464,7 +470,7 @@ def run_source(
             if key_error is not None:  # an unrelated failure says nothing about the key
                 _record_key_use(session, key_id, key_error)
             _on_failed(session, connector, run)
-            _notify(session, run, notifier)
+            _notify(session, run, notifier, connector)
             return _detach(session, run)
 
         if key_id is not None and cred is not None and state is not None and state.sent:
@@ -509,11 +515,11 @@ def run_source(
         except Exception as e:  # noqa: BLE001
             run = _fail(session, run_id, e, cred)
             _on_failed(session, connector, run)
-            _notify(session, run, notifier)
+            _notify(session, run, notifier, connector)
             return _detach(session, run)
 
         _after_run(session, connector, run)
-        _notify(session, run, notifier)
+        _notify(session, run, notifier, connector)
         return _detach(session, run)
     finally:
         session.close()

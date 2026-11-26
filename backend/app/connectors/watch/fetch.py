@@ -299,6 +299,24 @@ def _nav_blocked(client: httpx.Client, state: FetchState, url: str) -> bool:
 
 NEEDS_HTTPS = "keys can only be sent over https"
 NO_BROWSER_KEY = 'keys can\'t be used with "Needs a browser" yet'
+LOGIN_ENGINE_ONLY = "login keys are only used by the browser login"
+
+
+def preflight(client: httpx.Client, state: FetchState, url: str) -> FetchResult | None:
+    """The checks fetch_target makes before a request, for callers that render the page
+    themselves (logins.browser_fetch): scheme, destination policy (fail closed), robots.txt
+    and the per-host throttle. Returns the refusal, or None when the fetch may go ahead
+    (the throttle slot is then taken)."""
+    parts = urlsplit(url)
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        return FetchResult("error", error="invalid URL")
+    if not destination_allowed(parts.hostname):
+        return FetchResult("error", error=NOT_ALLOWED)
+    robots = _robots(client, state, parts.scheme, parts.netloc)
+    if robots is not None and not robots.can_fetch(USER_AGENT, url):
+        return FetchResult("blocked", error="disallowed by robots.txt")
+    state.throttle(parts.netloc)
+    return None
 
 
 def _origin(parts) -> tuple[str, int | None]:
@@ -331,6 +349,8 @@ def fetch_target(client: httpx.Client, url: str, use_browser: bool = False,
 def _fetch_target(client, url, use_browser, state, credential) -> FetchResult:
     origin = _origin(urlsplit(url))
     if credential is not None:
+        if credential.kind == "login":  # sessions go through logins.browser_fetch only
+            return FetchResult("error", error=LOGIN_ENGINE_ONLY)
         if use_browser:
             return FetchResult("error", error=NO_BROWSER_KEY)
         if urlsplit(url).scheme != "https":

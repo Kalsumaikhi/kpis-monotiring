@@ -261,6 +261,10 @@ def patch_credential(cid: int, body: CredentialPatch, session: Session = Depends
     if name is None or kind is None:
         raise HTTPException(422, "name and kind cannot be null")
     fields = _validate(name, kind, fields, data.get("secret"))
+    if row.kind == "login" and kind != "login" and session.scalar(
+            select(WatchTarget.id).where(WatchTarget.credential_id == cid).limit(1)) is not None:
+        # Its KPIs are browser KPIs on the login's hosts; another kind cannot serve them.
+        raise HTTPException(409, "this login is used by KPIs")
     if kind == "header" and row.kind != "header" and "secret" not in data:
         # The stored secret was never checked as a header value; check it now.
         try:
