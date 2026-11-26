@@ -743,3 +743,17 @@ def test_real_browser_code_flow(db_engine, tmp_path, monkeypatch, trust_test_cer
             s.execute(text("DELETE FROM sources WHERE id = :s"), {"s": sid})
             s.execute(text("DELETE FROM credentials WHERE id = :c"), {"c": cid})
             s.commit()
+
+
+def test_queue_runs_behind_a_running_run(db_session, session_factory):
+    """A run already running fetched with the old session: one more is queued behind it
+    (uq_runs_one_queued_per_source allows one queued run next to a running one)."""
+    c = mk_login(db_session)
+    src = mk_source(db_session, "custom-busy")
+    add_target(db_session, src, c)
+    db_session.add(Run(source_id=src.id, status="running", trigger="schedule"))
+    db_session.commit()
+    ids = la.queue_runs_for_login(session_factory, c.id)
+    assert len(ids) == 1
+    assert la.queue_runs_for_login(session_factory, c.id) == []  # one queued is enough
+    assert [r.trigger for r in queued(db_session, src)] == ["manual"]

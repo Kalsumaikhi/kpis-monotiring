@@ -87,7 +87,8 @@ def claim_pending(session_factory, limit: int) -> list[int]:
 
 def queue_runs_for_login(session_factory, credential_id: int) -> list[int]:
     """Queue a manual run for every enabled source with enabled targets using this login,
-    unless it already has a queued or running run. Returns the new run ids."""
+    unless it already has a queued run. A running run may have fetched with the old session,
+    so one run is queued behind it. Returns the new run ids."""
     out = []
     with session_factory() as s:
         sources = s.scalars(
@@ -96,9 +97,9 @@ def queue_runs_for_login(session_factory, credential_id: int) -> list[int]:
                    Source.enabled.is_(True))
             .distinct().order_by(Source.id)).all()
         for sid in sources:
-            busy = s.scalar(select(Run.id).where(Run.source_id == sid,
-                                                 Run.status.in_(("queued", "running"))).limit(1))
-            if busy is not None:
+            queued = s.scalar(select(Run.id).where(Run.source_id == sid,
+                                                   Run.status == "queued").limit(1))
+            if queued is not None:
                 continue
             run = Run(source_id=sid, status="queued", trigger="manual")
             try:
