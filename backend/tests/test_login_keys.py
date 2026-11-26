@@ -218,7 +218,7 @@ def test_downgrade_refused_with_login_keys(db_engine):
     from sqlalchemy import create_engine
     from sqlalchemy.engine import make_url
     base = make_url(db_engine.url.render_as_string(hide_password=False))
-    name = "kpi_test_dg"
+    name = f"{base.database}_dg"  # per test DB, so parallel test DBs never share it
     url = base.set(database=name)
     with db_engine.connect().execution_options(isolation_level="AUTOCOMMIT") as c:
         c.execute(text(f"DROP DATABASE IF EXISTS {name}"))
@@ -243,10 +243,55 @@ def test_downgrade_refused_with_login_keys(db_engine):
             assert c.execute(text("SELECT count(*) FROM credentials")).scalar_one() == 1
             assert c.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == head
             assert c.execute(text("SELECT to_regclass('login_sessions')")).scalar_one() is not None
+            assert c.execute(text(
+                "SELECT 1 FROM information_schema.columns WHERE table_name = 'sources' "
+                "AND column_name = 'needs_baseline'")).first() is not None
         with e.begin() as c:
             c.execute(text("DELETE FROM credentials"))
         assert alembic("downgrade", "0007").returncode == 0
         e.dispose()
     finally:
+        with db_engine.connect().execution_options(isolation_level="AUTOCOMMIT") as c:
+            c.execute(text(f"DROP DATABASE IF EXISTS {name} WITH (FORCE)"))
+
+
+def test_migration_0009_downgrade_and_upgrade(db_engine):
+    import subprocess
+    import sys
+    from pathlib import Path
+    from sqlalchemy import create_engine
+    from sqlalchemy.engine import make_url
+    base = make_url(db_engine.url.render_as_string(hide_password=False))
+    name = f"{base.database}_m9"
+    url = base.set(database=name)
+    with db_engine.connect().execution_options(isolation_level="AUTOCOMMIT") as c:
+        c.execute(text(f"DROP DATABASE IF EXISTS {name}"))
+        c.execute(text(f"CREATE DATABASE {name}"))
+    env = {**__import__("os").environ, "DATABASE_URL": url.render_as_string(hide_password=False)}
+
+    def alembic(*args):
+        r = subprocess.run([sys.executable, "-m", "alembic", *args], env=env,
+                           cwd=str(Path(__file__).resolve().parent.parent),
+                           capture_output=True, text=True)
+        assert r.returncode == 0, r.stderr
+    has_col = text("SELECT 1 FROM information_schema.columns WHERE table_name = 'sources' "
+                   "AND column_name = 'needs_baseline'")
+    e = create_engine(url)
+    try:
+        alembic("upgrade", "0009")
+        with e.begin() as c:
+            assert c.execute(has_col).first() is not None
+            c.execute(text("INSERT INTO sources (slug, name, area, access, needs_baseline) "
+                           "VALUES ('s', 'S', 'a', 'manual', true)"))
+        alembic("downgrade", "0008")
+        with e.connect() as c:
+            assert c.execute(has_col).first() is None
+            assert c.execute(text("SELECT count(*) FROM sources")).scalar_one() == 1
+        alembic("upgrade", "head")
+        with e.connect() as c:
+            assert c.execute(has_col).first() is not None
+            assert c.execute(text("SELECT needs_baseline FROM sources")).scalar_one() is False
+    finally:
+        e.dispose()
         with db_engine.connect().execution_options(isolation_level="AUTOCOMMIT") as c:
             c.execute(text(f"DROP DATABASE IF EXISTS {name} WITH (FORCE)"))

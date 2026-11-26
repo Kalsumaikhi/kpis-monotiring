@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from contextlib import ExitStack
 from typing import Any, Literal
 from urllib.parse import urlsplit
 
@@ -15,7 +16,8 @@ from sqlalchemy.orm import Session
 
 from app import credentials as creds
 from app.api.deps import get_session
-from app.api.util import iso
+from app.api.util import iso, source_lock
+from app.core.pipeline import _supersede_held
 from app.models import ACTIVE_ATTEMPT_STATUSES, Credential, LoginAttempt, LoginSession, Source, WatchTarget
 
 router = APIRouter()
@@ -286,6 +288,52 @@ def patch_credential(cid: int, body: CredentialPatch, session: Session = Depends
             ) from None
         if not HEADER_SAFE.match(stored):
             raise HTTPException(422, NOT_ASCII)
+    affected = _affected_sources(session, cid) if _changes_what_is_sent(row, kind, fields, data) \
+        else []
+    with ExitStack() as locks:
+        # Try-locks only, in id order; a busy one releases those already held (409).
+        for sid in affected:
+            locks.enter_context(source_lock(session, sid, BUSY_KEY))
+        _patch(session, row, cid, data, name, kind, fields, affected)
+    session.refresh(row)
+    return _json(row, _used_by(session, [cid]).get(cid), _fernet(),
+                 _login_info(session, [cid]).get(cid))
+
+
+BUSY_KEY = "a check is running for a source that uses this key; try again when it finishes"
+SENT_FIELDS = ("header_name", "prefix", "param_name", "username", "extra_hosts")
+
+
+def _host(url: str | None) -> str | None:
+    try:
+        return (urlsplit(url).hostname or "").lower() or None if url else None
+    except ValueError:
+        return None
+
+
+def _changes_what_is_sent(row: Credential, kind: str, fields: dict, data: dict) -> bool:
+    """Whether the edit changes what is sent with the key, so data fetched with it may differ."""
+    return ("secret" in data or kind != row.kind
+            or any(fields[k] != getattr(row, k) for k in SENT_FIELDS)
+            or _host(fields["login_url"]) != _host(row.login_url))
+
+
+def _affected_sources(session: Session, cid: int) -> list[int]:
+    """Sources whose fetched data depends on this key: those that send it as their own key
+    (when the connector sends keys) and custom sources with KPIs that use it."""
+    from app.api.routes_sources import _supports_keys
+    ids = {s.id for s in session.scalars(select(Source).where(Source.credential_id == cid))
+           if _supports_keys(session, s)}
+    ids |= set(session.scalars(
+        select(WatchTarget.source_id).where(WatchTarget.credential_id == cid).distinct()))
+    return sorted(ids)
+
+
+def _patch(session: Session, row: Credential, cid: int, data: dict, name: str, kind: str,
+           fields: dict, affected: list[int]) -> None:
+    """Apply the edit and commit. With `affected` (whose locks the caller holds) the next run
+    of each is a silent baseline for this key, and their held runs, diffed with the old
+    key, are dropped."""
     reset = kind == "login" and row.kind == "login" and (
         "secret" in data or fields["username"] != row.username
         or fields["login_url"] != row.login_url)
@@ -309,13 +357,18 @@ def patch_credential(cid: int, body: CredentialPatch, session: Session = Depends
             if ls is not None:
                 session.delete(ls)
                 _cancel_attempts(session, cid)
+        if affected:
+            session.execute(update(Source).where(Source.id.in_(affected),
+                                                 Source.credential_id == cid)
+                            .values(needs_baseline=True))
+            session.execute(update(WatchTarget).where(WatchTarget.credential_id == cid)
+                            .values(needs_baseline=True))
+            for sid in affected:
+                _supersede_held(session, sid, reason="a key change")
         session.commit()
     except IntegrityError:
         session.rollback()
         raise HTTPException(409, "a key with this name already exists") from None
-    session.refresh(row)
-    return _json(row, _used_by(session, [cid]).get(cid), _fernet(),
-                 _login_info(session, [cid]).get(cid))
 
 
 @router.delete("/credentials/{cid}", status_code=204)

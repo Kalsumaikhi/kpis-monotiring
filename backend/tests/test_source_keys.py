@@ -534,3 +534,122 @@ def test_key_change_on_source_without_key_hosts_is_not_a_baseline(db_session, cl
     assert client.patch("/api/sources/plain", json={"credential_id": k1.id}).status_code == 200
     db_session.expire_all()
     assert db_session.get(Source, src.id).needs_baseline is False
+
+
+def _dp_count(db_session, src):
+    from app.models import DataPoint
+    return db_session.scalar(select(func.count()).select_from(DataPoint).where(
+        DataPoint.source_id == src.id))
+
+
+def _n_changes(db_session):
+    from app.models import Change
+    return db_session.scalar(select(func.count()).select_from(Change))
+
+
+@respx.mock
+def test_incomplete_key_baseline_clears_flag(env, db_session, client):
+    src, conn, sf = env
+    k1 = mk_cred(db_session, name="K1")
+    respx.get("https://api.example.com/data").mock(return_value=httpx.Response(200, text="ok"))
+    conn.rows = [_row("AT", 1), _row("BE", 2), _row("CZ", 3)]
+    pipeline.run_source(sf, "fake")
+    assert client.patch("/api/sources/fake", json={"credential_id": k1.id}).status_code == 200
+    conn.rows, conn.complete = [_row("AT", 7), _row("DE", 4)], False
+    run = pipeline.run_source(sf, "fake")
+    assert run.status == "baseline", run.error
+    assert _n_changes(db_session) == 0
+    assert _dp_count(db_session, src) == 4  # nothing deleted, DE added
+    db_session.expire_all()
+    assert db_session.get(Source, src.id).needs_baseline is False
+    conn.rows = [_row("AT", 8), _row("BE", 2), _row("CZ", 3), _row("DE", 4)]
+    conn.complete = True
+    run = pipeline.run_source(sf, "fake")
+    assert run.status == "ok" and (run.added, run.altered, run.removed) == (0, 1, 0)
+
+
+@respx.mock
+def test_key_baseline_over_removal_limit_keeps_rows_and_flag(env, db_session, client):
+    src, conn, sf = env
+    k1 = mk_cred(db_session, name="K1")
+    respx.get("https://api.example.com/data").mock(return_value=httpx.Response(200, text="ok"))
+    conn.rows = [_row(f"C{i}", i) for i in range(10)]
+    pipeline.run_source(sf, "fake")
+    assert client.patch("/api/sources/fake", json={"credential_id": k1.id}).status_code == 200
+    conn.rows = [_row("C0", 0)]
+    run = pipeline.run_source(sf, "fake")
+    assert run.status == "baseline"
+    assert "key baseline skipped deletions: 9 rows missing (over the safety limit)" in run.error
+    assert _dp_count(db_session, src) == 10
+    assert _n_changes(db_session) == 0
+    db_session.expire_all()
+    assert db_session.get(Source, src.id).needs_baseline is True
+
+
+def test_key_change_on_source_without_key_hosts_takes_no_lock(db_session, client, monkeypatch,
+                                                                held_lock):
+    src = Source(slug="plain", name="Plain", area="test", access="manual")
+    db_session.add(src)
+    db_session.flush()
+    monkeypatch.setitem(registry.CONNECTORS, "plain", FakeConnector())
+    k1 = mk_cred(db_session, name="K1")
+    db_session.commit()
+    held_lock(src.id)
+    assert client.patch("/api/sources/plain", json={"credential_id": k1.id}).status_code == 200
+
+
+# --- editing a key that is in use (Settings -> Keys) ---------------------------------
+
+BUSY_KEY = "a check is running for a source that uses this key; try again when it finishes"
+
+
+@respx.mock
+def test_secret_replace_on_in_use_key_gives_silent_baseline(env, db_session, client):
+    from app.models import Run
+    src, conn, sf = env
+    k1 = mk_cred(db_session, name="K1")
+    src.credential_id = k1.id
+    db_session.flush()
+    respx.get("https://api.example.com/data").mock(return_value=httpx.Response(200, text="ok"))
+    conn.rows = [_row("AT", 1)]
+    pipeline.run_source(sf, "fake")
+    conn.rows = [_row("AT", 9)]
+    held = pipeline.run_source(sf, "fake", force_hold=True)
+    assert held.status == "suspect_pending"
+    r = client.patch(f"/api/credentials/{k1.id}", json={"secret": "sk-rotated-secret"})
+    assert r.status_code == 200, r.text
+    db_session.expire_all()
+    assert db_session.get(Source, src.id).needs_baseline is True
+    assert db_session.get(Run, held.id).status == "superseded"
+    conn.rows = [_row("AT", 2), _row("BE", 3)]
+    run = pipeline.run_source(sf, "fake")
+    assert run.status == "baseline" and _n_changes(db_session) == 0
+
+
+def test_key_edit_while_source_runs_409(env, db_session, client, held_lock):
+    src, conn, sf = env
+    k1 = mk_cred(db_session, name="K1")
+    src.credential_id = k1.id
+    db_session.commit()
+    held_lock(src.id)
+    before = db_session.get(Credential, k1.id).secret_enc
+    r = client.patch(f"/api/credentials/{k1.id}", json={"secret": "sk-rotated-secret",
+                                                         "header_name": "X-Other"})
+    assert r.status_code == 409 and r.json()["detail"] == BUSY_KEY
+    db_session.expire_all()
+    row = db_session.get(Credential, k1.id)
+    assert (row.secret_enc, row.header_name) == (before, "X-Key")
+    assert db_session.get(Source, src.id).needs_baseline is False
+
+
+def test_key_rename_takes_no_lock_and_no_baseline(env, db_session, client, held_lock):
+    src, conn, sf = env
+    k1 = mk_cred(db_session, name="K1")
+    src.credential_id = k1.id
+    db_session.commit()
+    held_lock(src.id)
+    assert client.patch(f"/api/credentials/{k1.id}", json={"name": "Renamed"}).status_code == 200
+    # unchanged values are not a change either
+    assert client.patch(f"/api/credentials/{k1.id}", json={"header_name": "X-Key"}).status_code == 200
+    db_session.expire_all()
+    assert db_session.get(Source, src.id).needs_baseline is False

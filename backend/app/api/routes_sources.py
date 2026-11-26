@@ -169,6 +169,9 @@ def list_sources(access: str | None = None, session: Session = Depends(get_sessi
     ]
 
 
+KEY_CHANGE = "a key change"
+
+
 @router.patch("/sources/{slug}")
 def patch_source(slug: str, body: SourcePatch, session: Session = Depends(get_session)):
     source = _source_or_404(session, slug)
@@ -188,8 +191,10 @@ def patch_source(slug: str, body: SourcePatch, session: Session = Depends(get_se
             if key.kind == "login":  # a login is a browser session, never a request header
                 raise HTTPException(422, "a login can only be used by KPIs")
         rekeys = body.credential_id != source.credential_id
-    if not rekeys:
+    if not (rekeys and _supports_keys(session, source)):  # a key it never sends changes nothing
         _apply_source_patch(source, body)
+        if rekeys:
+            source.credential_id = body.credential_id
         session.commit()
     else:
         # With another key (or none) the source may return other data (a key can unlock
@@ -203,9 +208,8 @@ def patch_source(slug: str, body: SourcePatch, session: Session = Depends(get_se
             _apply_source_patch(source, body)
             if body.credential_id != source.credential_id:
                 source.credential_id = body.credential_id
-                if _supports_keys(session, source):
-                    source.needs_baseline = True
-                    _supersede_held(session, sid, reason="a key change")
+                source.needs_baseline = True
+                _supersede_held(session, sid, reason=KEY_CHANGE)
             session.commit()
     return {"slug": source.slug, "enabled": source.enabled, "cron": source.cron,
             "credential_id": source.credential_id}

@@ -584,3 +584,31 @@ def test_watch_key_change_supersedes_held_run(wenv, db_session, client):
     assert db_session.scalars(select(PendingChange).where(PendingChange.run_id == held.id)).all() == []
     assert client.post(f"/api/runs/{held.id}/approve").status_code == 409
     assert db_session.get(WatchTarget, t.id).needs_baseline is True
+
+
+def test_key_edit_while_watch_source_runs_409(wenv, db_session, client, held_lock):
+    src, sf = wenv
+    c = mk_cred(db_session)
+    t = add_target(db_session, src, c)
+    other = add_target(db_session, src, None, url="https://h.example/o", name="Other")
+    t.needs_baseline = other.needs_baseline = False
+    db_session.commit()
+    held_lock(src.id)
+    r = client.patch(f"/api/credentials/{c.id}", json={"secret": "sk-new-secret-1"})
+    assert r.status_code == 409
+    db_session.expire_all()
+    assert db_session.get(WatchTarget, t.id).needs_baseline is False
+
+
+def test_key_secret_replace_sets_target_baseline(wenv, db_session, client):
+    src, sf = wenv
+    c = mk_cred(db_session)
+    t = add_target(db_session, src, c)
+    other = add_target(db_session, src, None, url="https://h.example/o", name="Other")
+    t.needs_baseline = other.needs_baseline = False
+    db_session.commit()
+    assert client.patch(f"/api/credentials/{c.id}", json={"secret": "sk-new-secret-1"}).status_code == 200
+    db_session.expire_all()
+    assert db_session.get(WatchTarget, t.id).needs_baseline is True
+    assert db_session.get(WatchTarget, other.id).needs_baseline is False
+    assert db_session.get(Source, src.id).needs_baseline is False  # watch: per target

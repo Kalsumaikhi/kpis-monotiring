@@ -505,12 +505,23 @@ def run_source(
                 )
             )
             run = session.get(Run, run_id)
+            warnings = [creds.redact(w, cred) for w in parsed.warnings]
             if not has_history or key_baseline:
-                apply_diff(session, source.id, run_id, parsed.complete, record_changes=False)
                 status = "baseline"
-                if key_baseline and parsed.complete:
-                    # An incomplete run left some old-key rows; the next run is silent too.
-                    session.get(Source, source.id).needs_baseline = False
+                if key_baseline and diff.existing > 0 \
+                        and diff.removed / diff.existing > settings.suspect_removal_ratio:
+                    # The new key returned far fewer rows (a wrong key, an outage): keep the
+                    # old rows (upsert only) and the flag, so the next run is silent too.
+                    apply_diff(session, source.id, run_id, False, record_changes=False)
+                    warnings.append(f"key baseline skipped deletions: {diff.removed} rows "
+                                    "missing (over the safety limit)")
+                else:
+                    apply_diff(session, source.id, run_id, parsed.complete, record_changes=False)
+                    if key_baseline:
+                        # Cleared by any non-failed key baseline, even an incomplete one (it
+                        # deleted nothing): a flag that waits for a complete run could keep
+                        # a source silent forever.
+                        session.get(Source, source.id).needs_baseline = False
             elif (
                 (diff.existing > 0 and diff.removed / diff.existing > settings.suspect_removal_ratio)
                 or (force_hold and diff.added + diff.altered + diff.removed > 0)
@@ -527,8 +538,7 @@ def run_source(
                 apply_diff(session, source.id, run_id, parsed.complete, record_changes=True,
                            exclude_indicators=excl)
                 status = "ok"
-            _finish(session, run, status, diff, parsed.indicators, parsed.vintage,
-                    [creds.redact(w, cred) for w in parsed.warnings])
+            _finish(session, run, status, diff, parsed.indicators, parsed.vintage, warnings)
         except Exception as e:  # noqa: BLE001
             run = _fail(session, run_id, e, cred)
             _on_failed(session, connector, run)
