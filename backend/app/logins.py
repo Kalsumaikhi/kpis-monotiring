@@ -383,20 +383,28 @@ def browser_fetch(url: str, cred: creds.Credential, state: dict | None,
         return FetchResult("error", error=f"browser error: {type(e).__name__}"), state, False
     if len(body) > MAX_BYTES:
         return FetchResult("error", ctype, error="too large"), state, False
-    return FetchResult("ok", ctype, _redact_cookies(creds.redact_bytes(body, cred), seed)), \
+    return FetchResult("ok", ctype, _redact_cookies(creds.redact_bytes(body, cred), seed,
+                                                     out_state if use_session else None)), \
         out_state, False
 
 
-MIN_REDACTED_COOKIE = 8  # shorter values ("en", "1") are too common to cut out of a page
+# A cookie value is cut out of fetched pages when it is httpOnly and at least 8 characters,
+# or any cookie of at least 16: short script-readable values ("accepted", "en") are too
+# common in page text to remove.
+MIN_HTTPONLY_COOKIE = 8
+MIN_ANY_COOKIE = 16
 
 
-def _redact_cookies(body: bytes, seed: dict | None) -> bytes:
-    """Cut the seeded session's cookie values (a page may echo them) out of `body`,
-    longest first so a value inside another is not left half-shown."""
-    values = {str(c.get("value") or "") for c in (seed or {}).get("cookies", [])}
-    for v in sorted((v for v in values if len(v) >= MIN_REDACTED_COOKIE), key=len, reverse=True):
-        body = body.replace(v.encode("utf-8"), b"***")
-    return body
+def _redact_cookies(body: bytes, *states: dict | None) -> bytes:
+    """Cut the session's cookie values (from the state applied and the state after the
+    fetch: cookies may rotate) out of `body`, in every spelling creds.secret_forms knows."""
+    values = set()
+    for st in states:
+        for c in (st or {}).get("cookies", []):
+            v = str(c.get("value") or "")
+            if len(v) >= MIN_ANY_COOKIE or (c.get("httpOnly") and len(v) >= MIN_HTTPONLY_COOKIE):
+                values.add(v)
+    return creds.redact_values_bytes(body, values) if values else body
 
 
 def sign_in(cred: creds.Credential, code_provider: Callable[[], str | None] | None,
