@@ -350,6 +350,18 @@ describe('SignInDialog', () => {
     w.unmount()
   })
 
+  it('adopting a finished attempt on 409 starts no timers', async () => {
+    vi.useFakeTimers({ now: new Date('2026-11-26T10:00:00Z') })
+    apiSend.mockRejectedValueOnce(new ApiError(409, 'a sign-in is already in progress'))
+    apiGet.mockResolvedValue(at('failed', { error: 'login failed: still on the login page' }))
+    const intervals = vi.spyOn(globalThis, 'setInterval')
+    const w = await openDialog()
+    expect(txt()).toContain('login failed: still on the login page')
+    expect(intervals).not.toHaveBeenCalled()
+    intervals.mockRestore()
+    w.unmount()
+  })
+
   it('cancel while signing in says cancelling and discards', async () => {
     apiSend.mockResolvedValueOnce({ attempt_id: 5, status: 'pending' })
     apiGet.mockResolvedValue(at('verifying'))
@@ -358,7 +370,7 @@ describe('SignInDialog', () => {
     apiSend.mockImplementationOnce(() => new Promise((r) => { release = () => r({}) }))
     ;(document.querySelector('[data-test=cancel]') as HTMLButtonElement).click()
     await flushPromises()
-    expect(txt()).toContain('Cancelling…')
+    expect(txt()).toContain('Cancelling… the browser finishes its current step')
     expect(txt()).toContain('If the sign-in was already accepted it will be discarded.')
     release()
     await flushPromises()

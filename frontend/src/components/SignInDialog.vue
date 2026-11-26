@@ -141,8 +141,8 @@ async function start() {
     if (e instanceof ApiError && e.status === 409) {
       await poll() // one is already running: follow it
       if (mine !== startSeq) return
-      if (attempt.value) startTimers()
-      else startError.value = e.detail
+      if (!attempt.value) startError.value = e.detail
+      else if (!FINAL.includes(attempt.value.status)) startTimers() // a finished one needs no polling
     } else {
       startError.value = e instanceof ApiError ? e.detail : 'Could not start the sign-in'
       stop()
@@ -276,7 +276,7 @@ function onBackdrop() {
         <h2 id="si-title">Sign in to {{ keyName }}</h2>
         <div id="si-body" class="body" aria-live="polite">
           <template v-if="cancelling">
-            <p class="line"><span class="spinner" aria-hidden="true" />Cancelling…</p>
+            <p class="line"><span class="spinner" aria-hidden="true" />Cancelling… the browser finishes its current step</p>
             <p class="muted">If the sign-in was already accepted it will be discarded.</p>
           </template>
           <p v-else-if="view === 'starting' || view === 'signing'" class="line" data-test="signing"><span class="spinner" aria-hidden="true" />Signing in to {{ host }}…</p>
