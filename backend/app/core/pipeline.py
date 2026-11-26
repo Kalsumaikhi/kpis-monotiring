@@ -161,9 +161,18 @@ _NOT_FINISHED = ("queued", "running", "approve_queued", "superseded")
 _INCOMPLETE = "incomplete:"
 
 
+def _without_skip_marker(error: str | None) -> str:
+    """run.error without a leading key-baseline skip marker (it is put first; see run_source)."""
+    error = error or ""
+    if error.startswith(SKIPPED_DELETIONS):
+        _, _, error = error.partition("; ")
+    return error
+
+
 def _incomplete_note(session: Session, run: Run) -> str | None:
     """The run's warning when it became incomplete (the previous finished run was not)."""
-    if run.status not in ("ok", "no_change", "baseline") or not (run.error or "").startswith(_INCOMPLETE):
+    error = _without_skip_marker(run.error)
+    if run.status not in ("ok", "no_change", "baseline") or not error.startswith(_INCOMPLETE):
         return None
     prev_error = session.execute(
         select(Run.error)
@@ -171,9 +180,9 @@ def _incomplete_note(session: Session, run: Run) -> str | None:
         .order_by(Run.id.desc())
         .limit(1)
     ).first()
-    if prev_error is not None and (prev_error[0] or "").startswith(_INCOMPLETE):
+    if prev_error is not None and _without_skip_marker(prev_error[0]).startswith(_INCOMPLETE):
         return None
-    return run.error[len(_INCOMPLETE):].strip()
+    return error[len(_INCOMPLETE):].strip()
 
 
 def _notify_extras(session: Session, run: Run) -> dict:
@@ -535,8 +544,9 @@ def run_source(
                     # second short fetch it is cleared, so the next run's removal guard holds
                     # the removals for review instead of the source staying silent forever.
                     apply_diff(session, source.id, run_id, False, record_changes=False)
-                    warnings.append(f"{SKIPPED_DELETIONS}: {diff.removed} rows "
-                                    "missing (over the safety limit)")
+                    # First, so the 2000-character cut of run.error can't drop it.
+                    warnings.insert(0, f"{SKIPPED_DELETIONS}: {diff.removed} rows "
+                                       "missing (over the safety limit)")
                     if _skipped_deletions_before(session, source.id, run_id):
                         session.get(Source, source.id).needs_baseline = False
                     diff = replace(diff, removed=0)  # nothing was removed; the warning has N

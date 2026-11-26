@@ -731,3 +731,29 @@ def test_key_edit_sets_needs_baseline_at(env, db_session, client):
     db_session.expire_all()
     s = db_session.get(Source, src.id)
     assert s.needs_baseline is True and s.needs_baseline_at is not None
+
+
+@respx.mock
+def test_skip_marker_survives_long_warnings(env, db_session, client):
+    """The marker comes first in run.error, so the 2000-character cut can't drop it."""
+    src, conn, sf = env
+    k1 = mk_cred(db_session, name="K1")
+    respx.get("https://api.example.com/data").mock(return_value=httpx.Response(200, text="ok"))
+    conn.rows = [_row(f"C{i}", i) for i in range(10)]
+    pipeline.run_source(sf, "fake")
+    assert client.patch("/api/sources/fake", json={"credential_id": k1.id}).status_code == 200
+    conn.rows = [_row("C0", 0)]
+    conn.warnings = ["x" * 1500, "y" * 1500]
+    run = pipeline.run_source(sf, "fake")
+    assert run.error.startswith("key baseline skipped deletions: 9 rows missing")
+    assert len(run.error) <= 2000
+
+
+def test_incomplete_note_still_found_after_the_skip_marker(db_session, source):
+    from app.models import Run
+    r = Run(source_id=source.id, status="baseline",
+            error="key baseline skipped deletions: 3 rows missing (over the safety limit); "
+                  "incomplete: 1 KPI(s) not checked: A")
+    db_session.add(r)
+    db_session.flush()
+    assert pipeline._incomplete_note(db_session, r) == "1 KPI(s) not checked: A"
